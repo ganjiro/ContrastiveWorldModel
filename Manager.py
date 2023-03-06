@@ -1,3 +1,4 @@
+import copy
 import os
 import random
 
@@ -6,7 +7,7 @@ import torch
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
 
-from DatasetBuilder import D4RLDatasetTrain, D4RLDatasetTest
+from DatasetBuilder import D4RLDataset  # D4RLDatasetTest
 from Models import Contrastive_world_model_end_to_end, VAE, ContrastiveHead
 from TD3_BC import TD3_BC, ReplayBuffer, eval_policy
 
@@ -26,7 +27,7 @@ from datetime import datetime
 
 class Manager:
 
-    def __init__(self, model_name, env_name, savepath=None, contrastive=True):
+    def __init__(self, model_name, env_name, perc=0.3, savepath=None, contrastive=True, writer_name="Manager"):
         self.savepath = savepath
         self.model_name = model_name
         self.env_name = env_name
@@ -34,13 +35,16 @@ class Manager:
 
         self.env = gym.make(env_name)
 
-        self.dataset = self.env.get_dataset()
+        self.dataset_contr, self.dataset_rl, self.dataset_test, self.corrupted_index = self.create_datasets(
+            self.env.get_dataset(), perc)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.train_loader = DataLoader(D4RLDatasetTrain(self.dataset), batch_size=2048, shuffle=True)
-        self.test_loader = DataLoader(D4RLDatasetTest(self.dataset), batch_size=500, shuffle=True)
+        self.loader = DataLoader(D4RLDataset(self.dataset_contr), batch_size=2048, shuffle=True)
+        self.test_loader = DataLoader(D4RLDataset(self.dataset_test), batch_size=500, shuffle=True)
 
-        self.writer = SummaryWriter('Manager_test_03/' + model_name + ('' if contrastive else '_no_contrastive')+ '/' + datetime.now().strftime("%m-%d-%Y_%H:%M"))
+        self.writer = SummaryWriter(
+            writer_name + '/' + model_name + ('' if contrastive else '_no_contrastive') + '/' + datetime.now().strftime(
+                "%m-%d-%Y_%H:%M"))
         self.loss_function_contrastive = nn.CrossEntropyLoss()
 
         if model_name == "end_to_end":
@@ -65,12 +69,14 @@ class Manager:
     def load(self, load_path):
         if self.model_name == "end_to_end":
 
-            self.model = torch.load(os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive')+ ".pt"))
+            self.model = torch.load(
+                os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
 
         elif self.model_name == "splitted":
 
             self.model_vae = torch.load(os.path.join(load_path, "VAE.pt"))
-            self.model_contr = torch.load(os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive')+ ".pt"))
+            self.model_contr = torch.load(
+                os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
 
     def train(self, epochs):
         if self.model_name == "splitted":
@@ -82,11 +88,55 @@ class Manager:
 
         if self.savepath:
             if self.model_name == "end_to_end":
-                torch.save(self.model, os.path.join(self.savepath, self.model_name + ('' if self.contrastive else '_no_contrastive')+ ".pt"))
+                torch.save(self.model, os.path.join(self.savepath, self.model_name + (
+                    '' if self.contrastive else '_no_contrastive') + ".pt"))
             elif self.model_name == "splitted":
-                torch.save(self.model_contr, os.path.join(self.savepath, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
+                torch.save(self.model_contr, os.path.join(self.savepath, self.model_name + (
+                    '' if self.contrastive else '_no_contrastive') + ".pt"))
 
         return
+
+    def create_datasets(self, dataset, perc):  # todo forse queste deep copy sono useless
+        np.random.seed(42)
+
+        aa = np.random.permutation(int(len(dataset['next_observations']) / 1000))
+        index = [i * 1000 + j for i in aa for j in range(1000)]
+
+        dataset_test = copy.deepcopy(dataset)
+
+        index_test = index[-200000:]
+        index_wl_rl = index[:500000]
+
+        dataset['actions'] = dataset['actions'][index_wl_rl]
+        dataset['infos/action_log_probs'] = dataset['infos/action_log_probs'][index_wl_rl]
+        dataset['next_observations'] = dataset['next_observations'][index_wl_rl]
+        dataset['observations'] = dataset['observations'][index_wl_rl]
+        dataset['rewards'] = dataset['rewards'][index_wl_rl]
+        dataset['terminals'] = dataset['terminals'][index_wl_rl]
+        dataset['timeouts'] = dataset['timeouts'][index_wl_rl]
+
+        dataset_test['actions'] = np.delete(dataset_test['actions'], index_test, axis=0)
+        dataset_test['infos/action_log_probs'] = np.delete(dataset_test['infos/action_log_probs'], index_test, axis=0)
+        dataset_test['next_observations'] = np.delete(dataset_test['next_observations'], index_test, axis=0)
+        dataset_test['observations'] = np.delete(dataset_test['observations'], index_test, axis=0)
+        dataset_test['rewards'] = np.delete(dataset_test['rewards'], index_test, axis=0)
+        dataset_test['terminals'] = np.delete(dataset_test['terminals'], index_test, axis=0)
+        dataset_test['timeouts'] = np.delete(dataset_test['timeouts'], index_test, axis=0)
+
+        to_corrupt = np.random.choice(len(dataset['next_observations']),
+                                      int(len(dataset['next_observations']) * perc), replace=False)
+
+        dataset_contr = copy.deepcopy(dataset)
+
+        dataset_contr['actions'] = np.delete(dataset_contr['actions'], to_corrupt, axis=0)
+        dataset_contr['infos/action_log_probs'] = np.delete(dataset_contr['infos/action_log_probs'], to_corrupt, axis=0)
+        dataset_contr['next_observations'] = np.delete(dataset_contr['next_observations'], to_corrupt, axis=0)
+        dataset_contr['observations'] = np.delete(dataset_contr['observations'], to_corrupt, axis=0)
+        dataset_contr['rewards'] = np.delete(dataset_contr['rewards'], to_corrupt, axis=0)
+        dataset_contr['terminals'] = np.delete(dataset_contr['terminals'], to_corrupt, axis=0)
+        dataset_contr['timeouts'] = np.delete(dataset_contr['timeouts'], to_corrupt, axis=0)
+
+        return dataset_contr, dataset, dataset_test, to_corrupt
 
     def close_writer(self):
         self.writer.flush()
@@ -98,7 +148,7 @@ class Manager:
         VAE_loss = 0
         recon_loss = 0
 
-        for batch_idx, (data, act, next) in enumerate(self.train_loader):
+        for batch_idx, (data, act, next) in enumerate(self.loader):
             self.optimizer.zero_grad()
             data = data.to(self.device)
             act = act.to(self.device)
@@ -129,18 +179,18 @@ class Manager:
 
             self.optimizer.step()
 
-        self.writer.add_scalar("Train/Total_loss", train_loss / len(self.train_loader), epoch)
-        self.writer.add_scalar("Train/loss_vae", VAE_loss / len(self.train_loader), epoch)
-        self.writer.add_scalar("Train/loss_next", recon_loss / len(self.train_loader), epoch)
-        self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.train_loader), epoch)
-        self.test_world_model(epoch)
-        return train_loss / len(self.train_loader)
+        self.writer.add_scalar("Train/Total_loss", train_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/loss_vae", VAE_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
+        if epoch % 5 == 0: self.test_world_model(epoch)
+        return train_loss / len(self.loader)
 
     def _train_splitted(self, epoch):
         train_loss = 0
         contr_loss = 0
         recon_loss = 0
-        for batch_idx, (data, act, next) in enumerate(self.train_loader):
+        for batch_idx, (data, act, next) in enumerate(self.loader):
             self.optimizer_contr.zero_grad()
 
             data = data.to(self.device)
@@ -169,16 +219,16 @@ class Manager:
             recon_loss += loss_recon.item()
             self.optimizer_contr.step()
 
-        self.writer.add_scalar("Train/loss_total", train_loss / len(self.train_loader), epoch)
-        self.writer.add_scalar("Train/loss_contrastive", contr_loss / len(self.train_loader), epoch)
-        self.writer.add_scalar("Train/loss_recon", recon_loss / len(self.train_loader), epoch)
-        self.test_world_model(epoch)
-        return train_loss / len(self.train_loader)
+        self.writer.add_scalar("Train/Total_loss", train_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
+        if epoch % 5 == 0: self.test_world_model(epoch)
+        return train_loss / len(self.loader)
 
     def _train_vae(self, epochs):
         for epoch in range(epochs):
             train_loss = 0
-            for batch_idx, (data, _, _) in enumerate(self.train_loader):
+            for batch_idx, (data, _, _) in enumerate(self.loader):
                 self.optimizer_vae.zero_grad()
                 data = data.to(self.device)
                 recon_batch, mu, log_var = self.model_vae(data)
@@ -187,7 +237,7 @@ class Manager:
                 loss.backward()
                 train_loss += loss.item()
                 self.optimizer_vae.step()
-            self.writer.add_scalar("Loss/VAE", train_loss / len(self.train_loader), epoch)
+            self.writer.add_scalar("Loss/VAE", train_loss / len(self.loader), epoch)
         if self.savepath:
             torch.save(self.model_vae, os.path.join(self.savepath, "VAE.pt"))
 
@@ -229,27 +279,25 @@ class Manager:
         print('Testing VAE NewData Recon Dist: {:.4f}'.format(dist_rec / len(self.test_loader)))
         print('Testing VAE NewData Trans Dist: {:.4f}'.format(dist_trans / len(self.test_loader)))
 
-    def test_td3_bc(self, perc, corr_type=0): #0 with model; 1 no corr; 2 mean; 3 noise; 4 remove
+    def test_td3_bc(self, corr_type=0):  # 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove
 
         max_action = float(self.env.action_space.high[0])
 
-        self.dataset = self.env.get_dataset()
-
         replay_buffer = ReplayBuffer(state_dim=26, action_dim=6)
-        replay_buffer.convert_D4RL(self.dataset)
+        replay_buffer.convert_D4RL(self.dataset_rl)
         mean, std = replay_buffer.normalize_states()
 
-        if corr_type==0:
-            self.corrupt_dataset(mean, std, perc)
-        elif corr_type==2:
-            self.corrupt_with_mean(mean, perc)
+        if corr_type == 0:
+            self.corrupt_w_worldmodel(mean, std)
+        elif corr_type == 2:
+            self.corrupt_w_mean(mean)
         elif corr_type == 3:
-            self.corrupt_with_noise(perc)
+            self.corrupt_w_noise()
         elif corr_type == 4:
-            self.remove(perc)
+            self.remove()
 
         replay_buffer_cor = ReplayBuffer(state_dim=26, action_dim=6)
-        replay_buffer_cor.convert_D4RL(self.dataset)
+        replay_buffer_cor.convert_D4RL(self.dataset_rl)
         mean, std = replay_buffer_cor.normalize_states()
 
         policy = TD3_BC(state_dim=26, action_dim=6, max_action=max_action, device=self.device)
@@ -263,27 +311,18 @@ class Manager:
                 self.writer.add_scalar("D4RL_score",
                                        eval_policy(policy, self.env_name, 42, mean, std), t)
 
+    def corrupt_w_mean(self, mean):
 
+        self.dataset_rl['next_observations'][self.corrupted_index] = mean
 
-    def corrupt_with_mean(self, mean, perc=0.3):
-        np.random.seed(42)
-        index = np.random.choice(len(self.dataset['next_observations']),
-                                 int(len(self.dataset['next_observations']) * perc))
+        self.dataset_rl['observations'][self.corrupted_index[self.corrupted_index % 1000 != 999] + 1] = mean
 
-        self.dataset['next_observations'][index] = mean
+    def corrupt_w_worldmodel(self, mean, std):
 
-        self.dataset['observations'][index + 1] = mean
-
-    def corrupt_dataset(self, mean, std, perc=0.3):
-
-        np.random.seed(42)
-        index = np.random.choice(len(self.dataset['next_observations']),
-                                 int(len(self.dataset['next_observations']) * perc))
-
-        obs = torch.Tensor(self.dataset['observations'][index])
+        obs = torch.Tensor(self.dataset_rl['observations'][self.corrupted_index])
         obs = (obs - mean) / std
         obs = obs.to(self.device)
-        act = torch.Tensor(self.dataset['actions'][index]).to(self.device)
+        act = torch.Tensor(self.dataset_rl['actions'][self.corrupted_index]).to(self.device)
 
         prediction = torch.empty(0).to(self.device)
 
@@ -302,37 +341,36 @@ class Manager:
         prediction = prediction.cpu().detach().numpy()
         prediction = (prediction * std) + mean
 
-        self.dataset['next_observations'][index] = prediction
+        self.dataset_rl['next_observations'][self.corrupted_index] = prediction
 
-        self.dataset['observations'][index + 1] = prediction
+        self.dataset_rl['observations'][self.corrupted_index[self.corrupted_index % 1000 != 999] + 1] = prediction[self.corrupted_index % 1000 != 999]
 
+    def remove(self):
 
+        self.dataset_rl['actions'] = np.delete(self.dataset_rl['actions'], self.corrupted_index, axis=0)
+        self.dataset_rl['infos/action_log_probs'] = np.delete(self.dataset_rl['infos/action_log_probs'],
+                                                              self.corrupted_index, axis=0)
+        self.dataset_rl['next_observations'] = np.delete(self.dataset_rl['next_observations'], self.corrupted_index,
+                                                         axis=0)
+        self.dataset_rl['observations'] = np.delete(self.dataset_rl['observations'], self.corrupted_index, axis=0)
+        self.dataset_rl['rewards'] = np.delete(self.dataset_rl['rewards'], self.corrupted_index, axis=0)
+        self.dataset_rl['terminals'] = np.delete(self.dataset_rl['terminals'], self.corrupted_index, axis=0)
+        self.dataset_rl['timeouts'] = np.delete(self.dataset_rl['timeouts'], self.corrupted_index, axis=0)
 
-    def remove(self, perc):
-        np.random.seed(42)
-        index = np.random.choice(len(self.dataset['next_observations']),
-                                 int(len(self.dataset['next_observations']) * perc))
-        self.dataset['actions'] = np.delete(self.dataset['actions'], index, axis=0)
-        self.dataset['infos/action_log_probs'] = np.delete(self.dataset['infos/action_log_probs'], index, axis=0)
-        self.dataset['next_observations'] = np.delete(self.dataset['next_observations'], index, axis=0)
-        self.dataset['observations'] = np.delete(self.dataset['observations'], index, axis=0)
-        self.dataset['rewards'] = np.delete(self.dataset['rewards'], index, axis=0)
-        self.dataset['terminals'] = np.delete(self.dataset['terminals'], index, axis=0)
-        self.dataset['timeouts'] = np.delete(self.dataset['timeouts'], index, axis=0)
+    def corrupt_w_noise(self):
+        noise = np.random.normal(0, 0.5, self.dataset_rl['next_observations'][self.corrupted_index].shape)
+        noisy = self.dataset_rl['next_observations'][self.corrupted_index] + noise
+        self.dataset_rl['next_observations'][self.corrupted_index] = noisy
 
-    def corrupt_with_noise(self, perc):
-        np.random.seed(42)
-        index = np.random.choice(len(self.dataset['next_observations']),
-                                 int(len(self.dataset['next_observations']) * perc))
+        self.dataset_rl['observations'][self.corrupted_index[self.corrupted_index % 1000 != 999] + 1] = noisy[self.corrupted_index % 1000 != 999]
 
-        noisy = self.dataset['next_observations'][index] + np.random.normal(0,1,self.dataset['next_observations'][index].shape)
-        self.dataset['next_observations'][index] = noisy
+    def train_nd_test(self, epochs, corr_type):
 
-        self.dataset['observations'][index + 1] = noisy
-
+        self.train(epochs)
+        self.test_td3_bc(corr_type)
 
     def test_render(self):
-        tmp_dataset = D4RLDatasetTrain(self.dataset)
+        tmp_dataset = D4RLDataset(self.dataset)
         var = tmp_dataset.var
         mean = tmp_dataset.mean
 
@@ -392,4 +430,3 @@ class Manager:
         axarr[1, 1].yaxis.set_ticklabels([])
 
         plt.show()
-
