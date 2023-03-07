@@ -39,8 +39,8 @@ class Manager:
             self.env.get_dataset(), perc)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.loader = DataLoader(D4RLDataset(self.dataset_contr), batch_size=2048, shuffle=True)
-        self.test_loader = DataLoader(D4RLDataset(self.dataset_test), batch_size=500, shuffle=True)
+        self.loader = DataLoader(D4RLDataset(self.dataset_contr), batch_size=1024, shuffle=True, num_workers=8)
+        self.test_loader = DataLoader(D4RLDataset(self.dataset_test), batch_size=500, shuffle=True, num_workers=8)
 
         self.writer = SummaryWriter(
             writer_name + '/' + model_name + ('' if contrastive else '_no_contrastive') + '/' + datetime.now().strftime(
@@ -60,6 +60,7 @@ class Manager:
 
             self.model_vae = VAE(input_dim=26, hidden_dim=400, z_dim=12).to(self.device)
             self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-3)
+            self.loaded_vae = False
 
             self.model_contr = ContrastiveHead(z_dim=12, action_dim=6, hidden_dim=200).to(self.device)
             self.optimizer_contr = torch.optim.Adam(self.model_contr.parameters(), lr=1e-4)
@@ -73,13 +74,17 @@ class Manager:
                 os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
 
         elif self.model_name == "splitted":
-
+            self.loaded_vae = True
             self.model_vae = torch.load(os.path.join(load_path, "VAE.pt"))
             self.model_contr = torch.load(
                 os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
 
+    def load_vae(self, load_path):
+        self.loaded_vae = True
+        self.model_vae = torch.load(os.path.join(load_path, "VAE.pt"))
+
     def train(self, epochs):
-        if self.model_name == "splitted":
+        if self.model_name == "splitted" and not self.loaded_vae:
             self._train_vae(100)
 
         for epoch in range(epochs):
@@ -165,10 +170,14 @@ class Manager:
             positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
 
             loss_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data)
-            loss_recon = F.mse_loss(x_t1_hat, next, reduction='mean')
+            loss_recon = F.huber_loss(x_t1_hat, next, reduction='mean')
             loss_contr = self.loss_function_contrastive(logits / 0.20, positive_label)
 
-            loss = loss_vae + loss_contr * (1 if self.contrastive else 0) + loss_recon
+            if self.contrastive:
+                loss = loss_vae + loss_contr + loss_recon
+            else:
+                loss = loss_vae + loss_recon
+            #print(loss_vae.item(), loss_contr.item(), loss_recon.item())
 
             loss.backward()
 
@@ -209,9 +218,13 @@ class Manager:
             logits = torch.cat([l_pos, l_neg], dim=1)
 
             positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
-            loss_recon = F.mse_loss(x_t1_hat, next, reduction='mean')
+            loss_recon = F.huber_loss(x_t1_hat, next, reduction='mean')
             loss_contr = self.loss_function_contrastive(logits / 0.2, positive_label)
-            loss = loss_contr * (1 if self.contrastive else 0) + loss_recon
+            if self.contrastive:
+                loss = loss_contr + loss_recon
+            else:
+                loss = loss_recon
+            #print(loss_contr.item(), loss_recon.item())
 
             loss.backward()
             train_loss += loss.item()
