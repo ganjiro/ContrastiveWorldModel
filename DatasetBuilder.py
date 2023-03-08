@@ -28,6 +28,10 @@ class D4RLDataset(data.Dataset):
         self.next = self.next[new_index]
         self.acts = self.acts[new_index]
 
+        self.obs = self.obs.to(torch.float32)
+        self.next = self.next.to(torch.float32)
+        self.acts = self.acts.to(torch.float32)
+
     def __len__(self):
         return self.obs.shape[0]
 

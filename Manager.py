@@ -49,7 +49,7 @@ class Manager:
 
         if model_name == "end_to_end":
 
-            self.model = Contrastive_world_model_end_to_end(input_dim=26, hidden_dim=400, z_dim=12, action_dim=6,
+            self.model = Contrastive_world_model_end_to_end(input_dim=17, hidden_dim=400, z_dim=12, action_dim=6,
                                                             hidden_dim_head=200).to(self.device)
 
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
@@ -58,7 +58,7 @@ class Manager:
 
         elif model_name == "splitted":
 
-            self.model_vae = VAE(input_dim=26, hidden_dim=400, z_dim=12).to(self.device)
+            self.model_vae = VAE(input_dim=17, hidden_dim=400, z_dim=12).to(self.device)
             self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-3)
             self.loaded_vae = False
 
@@ -313,7 +313,7 @@ class Manager:
         replay_buffer_cor.convert_D4RL(self.dataset_rl)
         mean, std = replay_buffer_cor.normalize_states()
 
-        policy = TD3_BC(state_dim=26, action_dim=6, max_action=max_action, device=self.device)
+        policy = TD3_BC(state_dim=17, action_dim=6, max_action=max_action, device=self.device)
 
         for t in range(500000):
             policy.train(replay_buffer_cor, batch_size=256)
@@ -336,6 +336,9 @@ class Manager:
         obs = (obs - mean) / std
         obs = obs.to(self.device)
         act = torch.Tensor(self.dataset_rl['actions'][self.corrupted_index]).to(self.device)
+
+        obs = obs.to(torch.float32)
+        act = act.to(torch.float32)
 
         prediction = torch.empty(0).to(self.device)
 
