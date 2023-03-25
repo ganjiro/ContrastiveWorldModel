@@ -9,6 +9,7 @@ class Contrastive_world_model_end_to_end(nn.Module):
 
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
 
         self.fc3 = nn.Linear(hidden_dim, z_dim)
         self.fc4 = nn.Linear(hidden_dim, z_dim)
@@ -31,7 +32,7 @@ class Contrastive_world_model_end_to_end(nn.Module):
     def reparameterize(self, mu, log_var):
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
-        out = mu + eps * std
+        out = mu #+ eps * std
         return out
 
     def getZ(self, x):
@@ -68,18 +69,21 @@ class VAE(nn.Module):
         super().__init__()
 
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim * 2)
+        self.fc_extra1 = nn.Linear(hidden_dim * 2, hidden_dim)
 
         self.fc3 = nn.Linear(hidden_dim, z_dim)
         self.fc4 = nn.Linear(hidden_dim, z_dim)
 
         self.fc5 = nn.Linear(z_dim, hidden_dim)
-        self.fc6 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc_extra2 = nn.Linear(hidden_dim, hidden_dim * 2)
+        self.fc6 = nn.Linear(hidden_dim * 2, hidden_dim)
         self.fc7 = nn.Linear(hidden_dim, input_dim)
 
     def encode(self, x):
         h = F.relu(self.fc1(x))
         h = F.relu(self.fc2(h))
+        h = F.relu(self.fc_extra1(h))
         mu, log_var = self.fc3(h), self.fc4(h)
         return mu, log_var
 
@@ -96,6 +100,7 @@ class VAE(nn.Module):
 
     def decode(self, z):
         h = F.relu(self.fc5(z))
+        h = F.relu(self.fc_extra2(h))
         h = F.relu(self.fc6(h))
         return self.fc7(h)
 
@@ -110,6 +115,9 @@ class ContrastiveHead(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(z_dim + action_dim, int(hidden_dim / 2))
         self.fc2 = nn.Linear(int(hidden_dim / 2), hidden_dim)
+        self.fc_extra_1 = nn.Linear(hidden_dim, hidden_dim * 2)
+        self.fc_extra_2 = nn.Linear(hidden_dim * 2, hidden_dim * 2)
+        self.fc_extra_3 = nn.Linear(hidden_dim * 2, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, int(hidden_dim / 2))
         self.fc4 = nn.Linear(int(hidden_dim / 2), z_dim)
 
@@ -117,6 +125,9 @@ class ContrastiveHead(nn.Module):
         x = torch.cat([x, action], dim=1)
         out = F.relu(self.fc1(x))
         out = F.relu(self.fc2(out))
+        out = F.relu(self.fc_extra_1(out))
+        out = F.relu(self.fc_extra_2(out))
+        out = F.relu(self.fc_extra_3(out))
         out = F.relu(self.fc3(out))
         out = self.fc4(out)
         return out
