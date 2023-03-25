@@ -37,6 +37,7 @@ class Manager:
         self.test_aug = test_aug
 
         self.env = gym.make(env_name)
+
         if self.test_aug:
             self.dataset_contr, self.dataset_rl, self.dataset_test = self.create_dataset_test_aug(
                 self.env.get_dataset(), test_aug_dimension)
@@ -168,6 +169,8 @@ class Manager:
         contr_loss = 0
         VAE_loss = 0
         recon_loss = 0
+        mse_vae_loss = 0
+        kl_vae_loss_ = 0
 
         for batch_idx, (data, act, next, _) in enumerate(self.loader):
             self.optimizer.zero_grad()
@@ -185,7 +188,8 @@ class Manager:
             logits = torch.cat([l_pos, l_neg], dim=1)
             positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
 
-            loss_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data)
+            loss_vae, mse_vae, kl_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
+                                              batch_idx + len(self.loader) * epoch)
             loss_recon = F.huber_loss(x_t1_hat, next, reduction='mean')
             loss_contr = self.loss_function_contrastive(logits / 0.20, positive_label)
 
@@ -201,6 +205,8 @@ class Manager:
             VAE_loss += loss_vae.item()
             contr_loss += loss_contr.item()
             recon_loss += loss_recon.item()
+            mse_vae_loss += mse_vae.item()
+            kl_vae_loss_ += kl_vae.item()
 
             self.optimizer.step()
 
@@ -208,6 +214,8 @@ class Manager:
         self.writer.add_scalar("Train/loss_vae", VAE_loss / len(self.loader), epoch)
         self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
         self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/mse_vae", mse_vae_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/kl_vae", kl_vae_loss_ / len(self.loader), epoch)
         if epoch % 50 == 0: self.test_world_model(epoch)
         return train_loss / len(self.loader)
 
@@ -236,7 +244,8 @@ class Manager:
             logits = torch.cat([l_pos, l_neg], dim=1)
             positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
 
-            loss_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data)
+            loss_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
+                                              batch_idx + len(self.loader) * epoch)
             loss_recon = F.huber_loss(x_t1_hat, next, reduction='mean')
             loss_reward = F.huber_loss(reward_pred, reward, reduction='mean')
             loss_contr = self.loss_function_contrastive(logits / 0.20, positive_label)
@@ -265,13 +274,71 @@ class Manager:
         if epoch % 50 == 0: self.test_world_model(epoch)
         return train_loss / len(self.loader)
 
-    @staticmethod
-    def loss_function_vae(recon_x, x, mu, log_var):
+    def _train_vae(self, epochs):
 
-        BCE = F.mse_loss(recon_x, x, reduction='sum')
+        self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=400, z_dim=12).to(self.device)
+        self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-3)
 
-        KLD = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
-        return BCE  # + KLD
+        for epoch in range(epochs):
+            train_loss = 0
+            sum_log_var = 0
+            bce_, kl_ = 0, 0
+
+            for batch_idx, (data, _, _, _) in enumerate(self.loader):
+                self.optimizer_vae.zero_grad()
+                data = data.to(self.device)
+                recon_batch, mu, log_var = self.model_vae(data)
+                loss, bce, kl = self.loss_function_vae(recon_batch, data, mu, log_var,
+                                                       batch_idx + len(self.loader) * epoch)
+
+                loss.backward()
+                train_loss += loss.item()
+                bce_ += bce.item()
+                kl_ += kl.item()
+                sum_log_var += torch.sum(log_var.detach()).item()
+
+                self.optimizer_vae.step()
+            print(len(self.loader))
+            self.writer.add_scalar("Loss/VAE", train_loss / len(self.loader), epoch)
+            if epoch % 20 == 0: self.test_VAE(epoch)
+            print(epoch, train_loss / (len(self.loader)), np.exp(sum_log_var / (len(self.loader) * 4096)),
+                  bce_ / (len(self.loader)), kl_ / (len(self.loader)))
+        if self.savepath:
+            torch.save(self.model_vae, os.path.join(self.savepath, "VAE.pt"))
+
+    def loss_function_vae(self, recon_x, x, mu, log_var, itr):
+
+        recons_loss = F.mse_loss(recon_x, x)
+
+        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim=1), dim=0)
+
+        itr_ = itr % (len(self.test_loader) * 50)
+
+        beta = min((itr_ / (len(self.test_loader) * 25)), 1)
+
+        self.writer.add_scalar("itr", itr_, itr)
+
+        self.writer.add_scalar("beta", beta, itr)
+
+        kld_weight = 1 / len(self.loader)
+        loss = recons_loss + beta * kld_weight * kld_loss
+
+        return loss, recons_loss, kld_loss
+
+    def test_VAE(self, epoch=0):
+
+        dist_rec = 0
+
+        for batch_idx, (data, act, next, reward) in enumerate(self.test_loader):
+            data = data.to(self.device)
+
+            with torch.no_grad():
+                recon_batch, _, _ = self.model_vae(data)
+
+            dist_rec += F.mse_loss(recon_batch, data)
+
+        self.writer.add_scalar("Test/MSE_Recon", dist_rec / len(self.test_loader), epoch)
+        print('Recon Dist: {:.4f}'.format(dist_rec / len(self.test_loader)))
 
     def test_world_model(self, epoch=0):
         dist_rec = 0
@@ -477,7 +544,7 @@ class Manager:
             plt.clf()
 
         for s in range(mse_distr.shape[1]):
-            plt.hist(torch.where(mse_distr[:,s] > 5, 5, mse_distr[:,s]), bins=100)
+            plt.hist(torch.where(mse_distr[:, s] > 5, 5, mse_distr[:, s]), bins=100)
             plt.title("MSE Feature " + str(s) + " " + self.env_name)
             plt.ylim([-10, 17000])
             plt.xlim([-0.5, 5])

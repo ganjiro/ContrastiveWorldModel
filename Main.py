@@ -1,16 +1,16 @@
 from Manager import Manager
 
 if __name__ == "__main__":
-    env_name = "halfcheetah-medium-replay-v2"
+    env_name = "halfcheetah-medium-expert-v2"
 
-    writer_name = "test_medium_replay_mujoco"
-    save_path = "replay_mujoco_models"
+    writer_name = "test_medium_expert_mujoco"
+    save_path = "expert_mujoco_models"
 
     model_name = "end_to_end"
     manager = Manager(model_name=model_name, env_name=env_name, savepath=save_path, contrastive=True, perc=0.7,
                       writer_name=writer_name)
-    # manager.train_nd_test(500, 0)
-    manager.load(save_path)
+    manager.train_nd_test(483, 0)
+    #manager.load(save_path)
     manager.test_distr()
     manager.test_td3_bc()
 
