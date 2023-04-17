@@ -1,6 +1,5 @@
 import copy
 import os
-import random
 
 import torch.nn.functional as F
 import torch
@@ -10,17 +9,18 @@ from torch.utils.data import DataLoader
 from DatasetBuilder import D4RLDataset  # D4RLDatasetTest
 from Models import Contrastive_world_model_end_to_end, VAE, \
     ContrastiveHead  # , Contrastive_world_model_end_to_end_reward
-from TD3_BC import TD3_BC, ReplayBuffer, eval_policy
-from TD3_BC_WM import TD3_BC_WM
+
+from TD3_BC_WM import TD3_BC_WM, ReplayBuffer, eval_policy
 
 os.environ["D4RL_SUPPRESS_IMPORT_ERROR"] = "1"
 os.environ["LD_LIBRARY_PATH"] += ":/home/gmacaluso/.mujoco/mujoco210/bin:/home/gmacaluso/miniconda3/lib"
+
+import d4rl.gym_bullet
+import d4rl.gym_mujoco
 import gym
 
 import torch.nn as nn
 
-import d4rl.gym_mujoco
-import d4rl.gym_bullet
 import numpy as np
 
 from torch.utils.tensorboard import SummaryWriter
@@ -31,7 +31,8 @@ from datetime import datetime
 class Manager:
 
     def __init__(self, model_name, env_name, perc=0.3, savepath=None, contrastive=True, writer_name="Manager",
-                 test_aug=False, test_aug_dimension=100000, target=False, entire_trajectory=True):
+                 test_aug=False, dimension=100000, target=False, entire_trajectory=True, test_name=""):
+        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.savepath = savepath
         self.model_name = model_name
         self.env_name = env_name
@@ -42,22 +43,27 @@ class Manager:
 
         self.env = gym.make(env_name)
 
+        self.writer_name = test_name + '_' + self.model_name + ('_target' if self.target else '') + \
+                           ('_testaug' if self.test_aug else '') + (
+                               '_traj' if self.entire_trajectory else '_random') + '_' + str(dimension) + (
+                               '' if contrastive else '_no_contrastive') + '_' + env_name + (
+                               '' if perc == 0 else str(perc))
+
         if not os.path.exists(savepath):
             os.mkdir(savepath)
 
         if self.test_aug:
             self.dataset_contr, self.dataset_rl, self.dataset_test = self.create_dataset_test_aug(
-                self.env.get_dataset(), test_aug_dimension)
+                self.env.get_dataset(), dimension)
         else:
             self.dataset_contr, self.dataset_rl, self.dataset_test, self.corrupted_index = self.create_datasets(
-                self.env.get_dataset(), perc)
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                self.env.get_dataset(), dimension, perc)
 
         self.loader = DataLoader(D4RLDataset(self.dataset_contr), batch_size=4096, shuffle=True, num_workers=8)
         self.test_loader = DataLoader(D4RLDataset(self.dataset_test), batch_size=500, shuffle=True, num_workers=8)
 
         self.writer = SummaryWriter(
-            writer_name + '/' + model_name + ('' if contrastive else '_no_contrastive') + '/' + datetime.now().strftime(
+            writer_name + '/' + self.writer_name + '/' + datetime.now().strftime(
                 "%m-%d-%Y_%H:%M"))
         self.loss_function_contrastive = nn.CrossEntropyLoss()
 
@@ -97,6 +103,8 @@ class Manager:
             self.optimizer_contr = torch.optim.Adam(self.model_contr.parameters(), lr=1e-4)
 
             self.train_fn = self._train_splitted
+        else:
+            self.model = None
 
     def load(self, load_path):
         if self.model_name == "end_to_end":
@@ -104,7 +112,8 @@ class Manager:
                 os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
             if self.target:
                 self.loaded_vae = True
-                self.model_vae = torch.load(os.path.join(load_path, "VAE.pt"))
+                self.model_vae = torch.load(os.path.join(load_path, "VAE.pt")).to(self.device)
+
                 self.model_vae.eval()
 
         elif self.model_name == "splitted":
@@ -127,6 +136,7 @@ class Manager:
 
         for epoch in range(epochs):
             loss = self.train_fn(epoch)
+
             print('Epoch {}/{}, Loss: {:.4f}'.format(epoch + 1, 500, loss))
 
         if self.savepath:
@@ -173,7 +183,7 @@ class Manager:
 
         return dataset_wl_rl, dataset, dataset_test
 
-    def create_datasets(self, dataset, perc):  # todo forse queste deep copy sono useless
+    def create_datasets(self, dataset, dimension, perc):  # todo forse queste deep copy sono useless
         np.random.seed(42)
 
         if self.entire_trajectory:
@@ -185,7 +195,7 @@ class Manager:
         dataset_test = copy.deepcopy(dataset)
 
         index_test = index[-20000:]
-        index_wl_rl = index[:10000]
+        index_wl_rl = index[:dimension]
 
         dataset['actions'] = dataset['actions'][index_wl_rl]
         dataset['infos/action_log_probs'] = dataset['infos/action_log_probs'][index_wl_rl]
@@ -222,6 +232,10 @@ class Manager:
         self.writer.flush()
         self.writer.close()
 
+    @staticmethod
+    def weighted_mse_loss(input, target, weight):
+        return (weight * (input - target) ** 2).mean()
+
     def _train_end_to_end(self, epoch):
         train_loss = 0
         contr_loss = 0
@@ -248,13 +262,13 @@ class Manager:
 
             loss_vae, mse_vae, kl_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
                                                                batch_idx + len(self.loader) * epoch)
-            loss_recon = F.huber_loss(x_t1_hat, next, reduction='mean')
+            loss_recon = F.mse_loss(x_t1_hat, next, reduction='mean')
             loss_contr = self.loss_function_contrastive(logits, positive_label)
 
             if self.contrastive:
-                loss = loss_vae + loss_contr + loss_recon
+                loss = loss_vae + loss_contr + loss_recon * 10
             else:
-                loss = loss_vae + loss_recon
+                loss = loss_vae + loss_recon * 10
             # print(loss_vae.item(), loss_contr.item(), loss_recon.item())
 
             loss.backward()
@@ -306,13 +320,14 @@ class Manager:
 
             loss_vae, mse_vae, kl_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
                                                                batch_idx + len(self.loader) * epoch)
-            loss_recon = F.huber_loss(x_t1_hat, next, reduction='mean')
+            loss_recon = F.mse_loss(x_t1_hat, next,
+                                    reduction='mean')  # self.weighted_mse_loss(x_t1_hat, next, weight)  #
             loss_contr = self.loss_function_contrastive(logits, positive_label)
 
             if self.contrastive:
-                loss = loss_vae + loss_contr + loss_recon
+                loss = loss_vae + loss_contr + loss_recon * 10
             else:
-                loss = loss_vae + loss_recon
+                loss = loss_vae + loss_recon * 10
             # print(loss_vae.item(), loss_contr.item(), loss_recon.item())
 
             loss.backward()
@@ -332,61 +347,6 @@ class Manager:
         self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
         self.writer.add_scalar("Train/mse_vae", mse_vae_loss / len(self.loader), epoch)
         self.writer.add_scalar("Train/kl_vae", kl_vae_loss_ / len(self.loader), epoch)
-        if epoch % 10 == 0: self.test_world_model(epoch)
-        return train_loss / len(self.loader)
-
-    def _train_end_to_end_reward(self, epoch):
-        train_loss = 0
-        contr_loss = 0
-        VAE_loss = 0
-        recon_loss = 0
-        reward_loss = 0
-
-        for batch_idx, (data, act, next, reward) in enumerate(self.loader):
-            self.optimizer.zero_grad()
-            data = data.to(self.device)
-            act = act.to(self.device)
-            next = next.to(self.device)
-            reward = reward.to(self.device)
-
-            z_pos, mu_pos, log_var_pos = self.model.getZ(next)
-            recon_batch, mu_data, log_var_data, z_data = self.model.reconstruct(data)
-            emb_q, reward_pred = self.model.transitionZ(z_data, act)
-
-            x_t1_hat = self.model.decode(emb_q)
-
-            l_pos = torch.sum(emb_q * z_pos, dim=1, keepdim=True)
-            l_neg = torch.mm(emb_q, z_data.t())
-            logits = torch.cat([l_pos, l_neg], dim=1)
-            positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
-
-            loss_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
-                                              batch_idx + len(self.loader) * epoch)
-            loss_recon = F.huber_loss(x_t1_hat, next, reduction='mean')
-            loss_reward = F.huber_loss(reward_pred, reward, reduction='mean')
-            loss_contr = self.loss_function_contrastive(logits / 0.20, positive_label)
-
-            if self.contrastive:
-                loss = loss_vae + loss_contr + loss_recon + loss_reward
-            else:
-                loss = loss_vae + loss_recon + loss_reward
-            # print(loss_vae.item(), loss_contr.item(), loss_recon.item(), loss_reward.item() )
-
-            loss.backward()
-
-            train_loss += loss.item()
-            VAE_loss += loss_vae.item()
-            contr_loss += loss_contr.item()
-            recon_loss += loss_recon.item()
-            reward_loss += loss_reward.item()
-
-            self.optimizer.step()
-
-        self.writer.add_scalar("Train/Total_loss", train_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/loss_vae", VAE_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/loss_reward", reward_loss / len(self.loader), epoch)
         if epoch % 10 == 0: self.test_world_model(epoch)
         return train_loss / len(self.loader)
 
@@ -436,7 +396,7 @@ class Manager:
     def _train_vae(self, epochs):
 
         self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=400, z_dim=12).to(self.device)
-        self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-3)
+        self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-4)
 
         for epoch in range(epochs):
             train_loss = 0
@@ -473,9 +433,9 @@ class Manager:
 
         kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim=1), dim=0)
 
-        itr_ = itr % (len(self.loader) * 100)
+        itr_ = itr % (len(self.loader) * 50)
 
-        beta = min((itr_ / (len(self.loader) * 50)), 1)
+        beta = min((itr_ / (len(self.loader) * 25)), 1)
 
         self.writer.add_scalar("itr", itr_, itr)
 
@@ -498,7 +458,10 @@ class Manager:
 
             dist_rec += F.mse_loss(recon_batch, data)
 
-        self.writer.add_scalar("Test/MSE_Recon", dist_rec / len(self.test_loader), epoch)
+            sas = np.mean(np.abs(recon_batch.cpu().numpy() - data.cpu().numpy()), axis=0)
+            # print(sas)
+
+        self.writer.add_scalar("Test_vae/MSE_Recon", dist_rec / len(self.test_loader), epoch)
         print('Recon Dist: {:.4f}'.format(dist_rec / len(self.test_loader)))
 
     def test_world_model(self, epoch=0):
@@ -536,44 +499,40 @@ class Manager:
         print('Recon Dist: {:.4f}'.format(dist_rec / len(self.test_loader)))
         print('Trans Dist: {:.4f}'.format(dist_trans / len(self.test_loader)))
 
-    def test_td3_bc(self, corr_type=0, aug=False):  # 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove
-
+    def test_td3_bc(self, corr_type=0, aug=0):  # corr_type 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove
+        # Aug 0 No aug; 1 Perc Batch; 2 Over esitmation # 3 noise
         max_action = float(self.env.action_space.high[0])
 
-        mean = self.dataset_rl["observations"].mean(0, keepdims=True)
-        std = self.dataset_rl["observations"].std(0, keepdims=True) + 1e-9
+        mean_ = self.dataset_rl["observations"].mean(0, keepdims=True)
+        std_ = self.dataset_rl["observations"].std(0, keepdims=True) + 1e-9
 
         if corr_type == 0:
-            if self.test_aug:
-                self.augment_dataset(mean, std)
-            else:
-                self.corrupt_w_worldmodel(mean, std)
+            # if self.test_aug:
+            #     self.augment_dataset(mean_, std_)
+            # else:
+            self.corrupt_w_worldmodel(mean_, std_)
         elif corr_type == 2:
-            self.corrupt_w_mean(mean)
+            self.corrupt_w_mean(mean_)
         elif corr_type == 3:
             self.corrupt_w_noise()
         elif corr_type == 4:
             self.remove()
 
-        replay_buffer_cor = ReplayBuffer(state_dim=self.env.observation_space.shape[0],
-                                         action_dim=self.env.action_space.shape[0])
-        replay_buffer_cor.convert_D4RL(self.dataset_rl)
-        mean, std = replay_buffer_cor.normalize_states()
+        replay_buffer = ReplayBuffer(state_dim=self.env.observation_space.shape[0],
+                                     action_dim=self.env.action_space.shape[0], device=self.device)
+        replay_buffer.convert_D4RL(self.dataset_rl)
+        mean, std = replay_buffer.normalize_states()
 
-        if aug:
-            policy = TD3_BC_WM(state_dim=self.env.observation_space.shape[0], action_dim=self.env.action_space.shape[0],
-                               max_action=max_action,
-                               device=self.device)
-        else:
-            policy = TD3_BC(state_dim=self.env.observation_space.shape[0], action_dim=self.env.action_space.shape[0],
-                            max_action=max_action,
-                            device=self.device)
+
+        policy = TD3_BC_WM(state_dim=self.env.observation_space.shape[0], action_dim=self.env.action_space.shape[0],
+                           max_action=max_action, world_model=self.model, aug_type=aug, writer=self.writer,
+                           device=self.device)
+
+
 
         for t in range(500000):
-            if aug:
-                policy.train(replay_buffer_cor, world_model=self.model, batch_size=256)
-            else:
-                policy.train(replay_buffer_cor, batch_size=256)
+            policy.train(replay_buffer, batch_size=256)
+
             # Evaluate episode
             if (t + 1) % 5000 == 0:
                 print(f"Time steps: {t + 1}")
@@ -591,7 +550,8 @@ class Manager:
 
         for idx in np.array_split(np.arange(len(self.dataset_rl['observations'])), 100):
             obs = torch.Tensor(self.dataset_rl['observations'][idx])
-            obs = (obs - mean) / std
+
+            obs -= mean  # obs = (obs - mean) / std
             act = torch.Tensor(self.dataset_rl['actions'][idx])
             reward = torch.Tensor(self.dataset_rl['rewards'][idx])
             terminal = torch.Tensor(self.dataset_rl['terminals'][idx])
@@ -632,7 +592,7 @@ class Manager:
     def corrupt_w_worldmodel(self, mean, std):
 
         obs = torch.Tensor(self.dataset_rl['observations'][self.corrupted_index])
-        obs = (obs - mean) / std
+        obs -= mean  # obs = (obs - mean) / std
         obs = obs.to(self.device)
         act = torch.Tensor(self.dataset_rl['actions'][self.corrupted_index]).to(self.device)
 
@@ -660,9 +620,7 @@ class Manager:
             prediction = torch.cat([prediction, prediction_itr])
 
         prediction = prediction.cpu().detach().numpy()
-        prediction = (prediction * std) + mean
-
-        sas = np.mean(np.mean(prediction - next, axis=1))
+        prediction += mean  # prediction = (prediction * std) + mean
 
         self.dataset_rl['next_observations'][self.corrupted_index] = prediction
 
@@ -692,7 +650,7 @@ class Manager:
         self.dataset_rl['observations'][self.corrupted_index[self.corrupted_index % 1000 != 999] + 1] = noisy[
             self.corrupted_index % 1000 != 999]
 
-    def train_nd_test(self, epochs, corr_type, aug_td3=False):
+    def train_nd_test(self, epochs, corr_type, aug_td3=0):
 
         self.train(epochs)
         self.test_td3_bc(corr_type, aug_td3)
@@ -775,7 +733,7 @@ class Manager:
 
             prediction = self.model_vae.decode(z_next)
 
-        mse = (prediction - _next).pow(2).mean(1)
+        mse = (prediction - _next).pow(2).mean(1)  # todo fix
 
         worst = torch.argmax(mse, dim=0)
 
@@ -824,34 +782,37 @@ class Manager:
         starting_point = np.random.randint(0, 20000 - 10, size=(1000))  # - tmp_dataset.mean) / tmp_dataset.std
 
         act_itr = torch.FloatTensor(self.dataset_test['actions'][starting_point]).to(self.device)
-        obs_itr = torch.FloatTensor(self.dataset_test['next_observations'][starting_point]).to(self.device)
-        next_itr = torch.FloatTensor(self.dataset_test['observations'][starting_point]).to(self.device)
+        obs_itr = torch.FloatTensor(self.dataset_test['observations'][starting_point]).to(self.device)
+        next_itr = torch.FloatTensor(self.dataset_test['next_observations'][starting_point]).to(
+            self.device)  # [starting_point]
 
-        obs_itr -= torch.FloatTensor(tmp_dataset.mean).to(self.device)
-        obs_itr /= torch.FloatTensor(tmp_dataset.std).to(self.device)
+        mean = torch.FloatTensor(tmp_dataset.mean).to(self.device)
+        std = torch.FloatTensor(tmp_dataset.std).to(self.device)
 
-        next_itr -= torch.FloatTensor(tmp_dataset.mean).to(self.device)
-        next_itr /= torch.FloatTensor(tmp_dataset.std).to(self.device)
+        obs_itr -= mean
+        # obs_itr /= std
+
+        next_itr -= mean
+        # next_itr /= var
 
         for i in range(10):
             with torch.no_grad():
                 prediction = self.model(obs_itr, act_itr)
+                reconstruction, _, _, _ = self.model.reconstruct(obs_itr)
 
+            # pred = mean + prediction #(prediction * std) + mean
+            if i == 0: print("Recon Error",
+                             np.mean(np.square(reconstruction.cpu().numpy() - obs_itr.cpu().numpy()), axis=0))
+            if i == 0: print("Trans Error",
+                             np.mean(np.square(prediction.cpu().numpy() - next_itr.cpu().numpy()), axis=0))
 
-
-
-
-
-
-
-
-            mse_depth.append(F.mse_loss(prediction, next_itr).detach().cpu())
+            mse_depth.append(F.mse_loss(prediction, next_itr).detach().cpu().item())
 
             act_itr = torch.Tensor(self.dataset_test['actions'][starting_point + i + 1]).to(self.device)
             obs_itr = prediction.detach()
-            next_itr = torch.Tensor(self.dataset_test['observations'][starting_point + i + 1]).to(self.device)
+            next_itr = torch.Tensor(self.dataset_test['next_observations'][starting_point + i + 1]).to(self.device)
 
-            next_itr -= torch.FloatTensor(tmp_dataset.mean).to(self.device)
-            next_itr /= torch.FloatTensor(tmp_dataset.std).to(self.device)
+            next_itr -= mean
+            # next_itr /= std
 
         print(mse_depth)

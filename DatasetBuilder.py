@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import torch
 import torch.utils.data as data
@@ -7,7 +9,8 @@ class D4RLDataset(data.Dataset):
 
     def __init__(self, data):
         np.random.seed(seed=42)
-        self.data = data
+
+        self.data = copy.deepcopy(data)
 
         self.obs = torch.from_numpy(self.data['observations']).float().float()
         self.next = torch.from_numpy(self.data['next_observations']).float()

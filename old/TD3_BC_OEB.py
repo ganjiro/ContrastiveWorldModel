@@ -1,10 +1,10 @@
 import numpy as np
 import torch
 import copy
+
 from torch import nn
 import torch.nn.functional as F
 import gym
-
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, max_action):
@@ -57,22 +57,20 @@ class Critic(nn.Module):
         return q1
 
 
-class TD3_BC_WM(object):
+class TD3_BC_OEB(object):
     def __init__(
             self,
             state_dim,
             action_dim,
             max_action,
             world_model,
-            aug_type=0,  # 0 no aug, 1 perc batch size, 2 over estimation bias, 3 noise
             discount=0.99,
             tau=0.005,
             policy_noise=0.2,
             noise_clip=0.5,
             policy_freq=2,
             alpha=2.5,
-            device='cpu',
-            writer=None
+            device='cpu'
     ):
 
         self.actor = Actor(state_dim, action_dim, max_action).to(device)
@@ -91,43 +89,19 @@ class TD3_BC_WM(object):
         self.policy_freq = policy_freq
         self.alpha = alpha
         self.device = device
-        self.writer = writer
+        self.world_model = world_model
 
         self.total_it = 0
-
-        self.aug_type = aug_type
-        self.world_model = world_model
 
     def select_action(self, state):
         state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
         return self.actor(state).cpu().data.numpy().flatten()
 
-    def train(self, replay_buffer, batch_size=256, perc=0.5):
+    def train(self, replay_buffer, batch_size=256):
         self.total_it += 1
 
         # Sample replay buffer
         state, action, next_state, reward, not_done = replay_buffer.sample(batch_size)
-
-        if self.aug_type == 1:
-            to_aug = np.random.choice(len(next_state),
-                                      int(len(next_state) * perc), replace=False)
-
-            with torch.no_grad():
-                next_state_aug = self.world_model(state, action)
-
-            next_state[to_aug] = next_state_aug[to_aug]
-
-        elif self.aug_type == 3:
-            to_aug = np.random.choice(len(next_state),
-                                      int(len(next_state) * perc), replace=False)
-
-            next_state[to_aug] = next_state[to_aug] + torch.randn_like(next_state[to_aug]) / 10
-
-        # state = torch.cat([state, state])
-        # action = torch.cat([action, action])
-        # reward = torch.cat([reward, reward])
-        # not_done = torch.cat([not_done, not_done])
-        # next_state = torch.cat([next_state, next_state_aug])
 
         with torch.no_grad():
             # Select action according to policy and add clipped noise
@@ -141,34 +115,22 @@ class TD3_BC_WM(object):
 
             # Compute the target Q value
             target_Q1, target_Q2 = self.critic_target(next_state, next_action)
-            if self.aug_type == 2:
-                next_state_aug = self.world_model(state, action)
 
-                next_action_aug = (
-                        self.actor_target(next_state_aug) + noise
-                ).clamp(-self.max_action, self.max_action)
+            next_state_aug = self.world_model(state, action)
+            target_Q1_aug, target_Q2_aug = self.critic_target(next_state_aug, next_action)
 
-                target_Q1_aug, target_Q2_aug = self.critic_target(next_state_aug, next_action_aug)
+            target_Q = torch.min(target_Q1, target_Q2)
 
-                target_Q = torch.min(target_Q1, target_Q2)
-                target_Q_aug = torch.min(target_Q1_aug, target_Q2_aug)
-                target_Q = torch.min(target_Q, target_Q_aug)
+            target_Q_aug = torch.min(target_Q1_aug, target_Q2_aug)
+            target_Q = torch.min(target_Q, target_Q_aug)
 
-            else:
-
-                target_Q = torch.min(target_Q1, target_Q2)
-                target_Q = reward + not_done * self.discount * target_Q
+            target_Q = reward + not_done * self.discount * target_Q
 
         # Get current Q estimates
         current_Q1, current_Q2 = self.critic(state, action)
 
         # Compute critic loss
-        if self.aug_type == 2:
-            critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q) + (
-                    F.mse_loss(target_Q1_aug, target_Q1) + F.mse_loss(target_Q2_aug, target_Q2)) / F.mse_loss(
-                next_state_aug, next_state)
-        else:
-            critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
+        critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
 
         # Optimize the critic
         self.critic_optimizer.zero_grad()
@@ -197,9 +159,6 @@ class TD3_BC_WM(object):
             for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
-            if self.writer: self.writer.add_scalar("TD3BC/actor_loss", actor_loss, self.total_it)
-        if self.writer: self.writer.add_scalar("TD3BC/critic_loss", critic_loss, self.total_it)
-
     def save(self, filename):
         torch.save(self.critic.state_dict(), filename + "_critic")
         torch.save(self.critic_optimizer.state_dict(), filename + "_critic_optimizer")
@@ -219,7 +178,7 @@ class TD3_BC_WM(object):
 
 class ReplayBuffer(object):
 
-    def __init__(self, state_dim, action_dim, device, max_size=int(1e6)):
+    def __init__(self, state_dim, action_dim,device,  max_size=int(1e6) ):
         self.max_size = max_size
         self.ptr = 0
         self.size = 0

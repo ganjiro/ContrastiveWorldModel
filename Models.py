@@ -32,7 +32,7 @@ class Contrastive_world_model_end_to_end(nn.Module):
     def reparameterize(self, mu, log_var):
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
-        out = mu #+ eps * std
+        out = mu + eps * std
         return out
 
     def getZ(self, x):
