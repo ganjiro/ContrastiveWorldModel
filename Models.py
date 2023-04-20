@@ -9,23 +9,25 @@ class Contrastive_world_model_end_to_end(nn.Module):
 
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc2_ = nn.Linear(hidden_dim, hidden_dim)
 
         self.fc3 = nn.Linear(hidden_dim, z_dim)
         self.fc4 = nn.Linear(hidden_dim, z_dim)
 
         self.fc5 = nn.Linear(z_dim, hidden_dim)
         self.fc6 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc6_ = nn.Linear(hidden_dim, hidden_dim)
         self.fc7 = nn.Linear(hidden_dim, input_dim)
 
-        self.fc1_contr = nn.Linear(z_dim + action_dim, int(hidden_dim_head / 2))
-        self.fc2_contr = nn.Linear(int(hidden_dim_head / 2), hidden_dim_head)
-        self.fc3_contr = nn.Linear(hidden_dim_head, int(hidden_dim_head / 2))
-        self.fc4_contr = nn.Linear(int(hidden_dim_head / 2), z_dim)
+        self.fc1_contr = nn.Linear(z_dim + action_dim, hidden_dim_head)
+        self.fc2_contr = nn.Linear(hidden_dim_head, hidden_dim_head*2)
+        self.fc3_contr = nn.Linear(hidden_dim_head*2, hidden_dim_head)
+        self.fc4_contr = nn.Linear(hidden_dim_head, z_dim)
 
     def encode(self, x):
         h = F.relu(self.fc1(x))
         h = F.relu(self.fc2(h))
+        h = F.relu(self.fc2_(h))
         mu, log_var = self.fc3(h), self.fc4(h)
         return mu, log_var
 
@@ -42,6 +44,7 @@ class Contrastive_world_model_end_to_end(nn.Module):
     def decode(self, z):
         h = F.relu(self.fc5(z))
         h = F.relu(self.fc6(h))
+        h = F.relu(self.fc6_(h))
         return self.fc7(h)
 
     def reconstruct(self, x):

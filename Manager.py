@@ -499,8 +499,8 @@ class Manager:
         print('Recon Dist: {:.4f}'.format(dist_rec / len(self.test_loader)))
         print('Trans Dist: {:.4f}'.format(dist_trans / len(self.test_loader)))
 
-    def test_td3_bc(self, corr_type=0, aug=0):  # corr_type 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove
-        # Aug 0 No aug; 1 Perc Batch; 2 Over esitmation # 3 noise
+    def test_td3_bc(self, corr_type=0, aug=0):  # corr_type 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove;
+        # Aug 0 No aug; 1 Perc Batch; 2 Over esitmation # 3 noise # 4 S4rl
         max_action = float(self.env.action_space.high[0])
 
         mean_ = self.dataset_rl["observations"].mean(0, keepdims=True)
