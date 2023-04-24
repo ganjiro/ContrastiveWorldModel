@@ -158,25 +158,25 @@ class TD3_BC_WM(object):
             elif self.aug_type == 4:
 
                 next_state_aug_0 = self.world_model(state, action)
-                next_state_aug_1 = self.world_model(state, action)
-                next_state_aug_2 = self.world_model(state, action)
+                # next_state_aug_1 = self.world_model(state, action)
+                # next_state_aug_2 = self.world_model(state, action)
 
                 next_action_aug_0 = (
                         self.actor_target(next_state_aug_0) + noise
                 ).clamp(-self.max_action, self.max_action)
-                next_action_aug_1 = (
-                        self.actor_target(next_state_aug_1) + noise
-                ).clamp(-self.max_action, self.max_action)
-                next_action_aug_2 = (
-                        self.actor_target(next_state_aug_2) + noise
-                ).clamp(-self.max_action, self.max_action)
+                # next_action_aug_1 = (
+                #         self.actor_target(next_state_aug_1) + noise
+                # ).clamp(-self.max_action, self.max_action)
+                # next_action_aug_2 = (
+                #         self.actor_target(next_state_aug_2) + noise
+                # ).clamp(-self.max_action, self.max_action)
 
                 target_Q1_aug_0, target_Q2_aug_0 = self.critic_target(next_state_aug_0, next_action_aug_0)
-                target_Q1_aug_1, target_Q2_aug_1 = self.critic_target(next_state_aug_1, next_action_aug_1)
-                target_Q1_aug_2, target_Q2_aug_2 = self.critic_target(next_state_aug_2, next_action_aug_2)
+                # target_Q1_aug_1, target_Q2_aug_1 = self.critic_target(next_state_aug_1, next_action_aug_1)
+                # target_Q1_aug_2, target_Q2_aug_2 = self.critic_target(next_state_aug_2, next_action_aug_2)
 
-                target_Q1 = torch.mean(torch.cat([target_Q1, target_Q1_aug_0, target_Q1_aug_1, target_Q1_aug_2]))
-                target_Q2 = torch.mean(torch.cat([target_Q2, target_Q2_aug_0, target_Q2_aug_1, target_Q2_aug_2]))
+                target_Q1 = torch.mean(torch.cat([target_Q1, target_Q1_aug_0]))
+                target_Q2 = torch.mean(torch.cat([target_Q2, target_Q2_aug_0]))
 
                 target_Q = torch.min(target_Q1, target_Q2)
 

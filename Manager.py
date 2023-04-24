@@ -31,28 +31,25 @@ from datetime import datetime
 class Manager:
 
     def __init__(self, model_name, env_name, perc=0.3, savepath=None, contrastive=True, writer_name="Manager",
-                 test_aug=False, dimension=100000, target=False, entire_trajectory=True, test_name=""):
+                 test_aug=False, dimension=None, entire_trajectory=True, test_name=""):
         self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.savepath = savepath
         self.model_name = model_name
         self.env_name = env_name
         self.contrastive = contrastive
         self.test_aug = test_aug
-        self.target = target
         self.entire_trajectory = entire_trajectory
 
         self.env = gym.make(env_name)
 
-        self.writer_name = test_name + '_' + self.model_name + ('_target' if self.target else '') + \
-                           ('_testaug' if self.test_aug else '') + (
-                               '_traj' if self.entire_trajectory else '_random') + '_' + str(dimension) + (
-                               '' if contrastive else '_no_contrastive') + '_' + env_name + (
-                               '' if perc == 0 else str(perc))
-
         if not os.path.exists(savepath):
             os.mkdir(savepath)
 
-        if self.test_aug:
+        if self.entire_trajectory and not dimension:
+            self.dataset_contr, self.dataset_rl, self.dataset_test, dimension = self.create_full_dataset(
+                self.env.get_dataset())
+
+        elif self.test_aug:
             self.dataset_contr, self.dataset_rl, self.dataset_test = self.create_dataset_test_aug(
                 self.env.get_dataset(), dimension)
         else:
@@ -61,6 +58,12 @@ class Manager:
 
         self.loader = DataLoader(D4RLDataset(self.dataset_contr), batch_size=4096, shuffle=True, num_workers=8)
         self.test_loader = DataLoader(D4RLDataset(self.dataset_test), batch_size=500, shuffle=True, num_workers=8)
+
+        self.writer_name = test_name + '_' + self.model_name + \
+                           ('_testaug' if self.test_aug else '') + (
+                               '_traj' if self.entire_trajectory else '_random') + '_' + str(dimension) + (
+                               '' if contrastive else '_no_contrastive') + '_' + env_name + (
+                               '' if perc == 0 else str(perc))
 
         self.writer = SummaryWriter(
             writer_name + '/' + self.writer_name + '/' + datetime.now().strftime(
@@ -75,14 +78,14 @@ class Manager:
 
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
 
-            self.train_fn = self._train_end_to_end
+            self.train_fn = self._train_end_to_end_new
 
-            if self.target:
+            if self.contrastive:
                 self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=500, z_dim=12).to(
                     self.device)
                 self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-3)
                 self.loaded_vae = False
-                self.train_fn = self._train_end_to_end_target
+
         # elif model_name == "reward":
         #     self.model = Contrastive_world_model_end_to_end_reward(input_dim=17, hidden_dim=500, z_dim=12, action_dim=6,
         #                                                     hidden_dim_head=300).to(self.device)
@@ -110,7 +113,7 @@ class Manager:
         if self.model_name == "end_to_end":
             self.model = torch.load(
                 os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
-            if self.target:
+            if self.contrastive:
                 self.loaded_vae = True
                 self.model_vae = torch.load(os.path.join(load_path, "VAE.pt")).to(self.device)
 
@@ -129,7 +132,7 @@ class Manager:
         self.model_vae.eval()
 
     def train(self, epochs):
-        if (self.model_name == "splitted" and not self.loaded_vae) or (self.target and not self.loaded_vae):
+        if (self.model_name == "splitted" and not self.loaded_vae) or (self.contrastive and not self.loaded_vae):
             self.model_vae.train()
             self._train_vae(500)
             self.model_vae.eval()
@@ -228,16 +231,83 @@ class Manager:
 
         return dataset_contr, dataset, dataset_test, to_corrupt
 
+    def create_full_dataset(self, dataset):
+
+        dataset_test = copy.deepcopy(dataset)
+        dataset_contr = copy.deepcopy(dataset)
+
+        dataset_test['actions'] = dataset_test['actions'][-20000:]
+        dataset_test['infos/action_log_probs'] = dataset_test['infos/action_log_probs'][-20000:]
+        dataset_test['next_observations'] = dataset_test['next_observations'][-20000:]
+        dataset_test['observations'] = dataset_test['observations'][-20000:]
+        dataset_test['rewards'] = dataset_test['rewards'][-20000:]
+        dataset_test['terminals'] = dataset_test['terminals'][-20000:]
+        dataset_test['timeouts'] = dataset_test['timeouts'][-20000:]
+
+        return dataset_contr, dataset, dataset_test, len(dataset['actions'])
+
     def close_writer(self):
         self.writer.flush()
         self.writer.close()
 
-    @staticmethod
-    def weighted_mse_loss(input, target, weight):
-        return (weight * (input - target) ** 2).mean()
+    # def _train_end_to_end(self, epoch):
+    #     train_loss = 0
+    #     contr_loss = 0
+    #     VAE_loss = 0
+    #     recon_loss = 0
+    #     mse_vae_loss = 0
+    #     kl_vae_loss_ = 0
+    #
+    #     for batch_idx, (data, act, next, _) in enumerate(self.loader):
+    #         self.optimizer.zero_grad()
+    #         data = data.to(self.device)
+    #         act = act.to(self.device)
+    #         next = next.to(self.device)
+    #
+    #         z_pos, mu_pos, log_var_pos = self.model.getZ(next)
+    #         recon_batch, mu_data, log_var_data, z_data = self.model.reconstruct(data)
+    #         emb_q = self.model.transitionZ(z_data, act)
+    #         x_t1_hat = self.model.decode(emb_q)
+    #
+    #         l_pos = torch.sum(emb_q * z_pos, dim=1, keepdim=True)
+    #         l_neg = torch.mm(emb_q, z_data.t())
+    #         logits = torch.cat([l_pos, l_neg], dim=1)
+    #         positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
+    #
+    #         loss_vae, mse_vae, kl_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
+    #                                                            batch_idx + len(self.loader) * epoch)
+    #         loss_recon = F.mse_loss(x_t1_hat, next, reduction='mean')
+    #         loss_contr = self.loss_function_contrastive(logits, positive_label)
+    #
+    #         if self.contrastive:
+    #             loss = loss_vae + loss_contr + loss_recon * 10
+    #         else:
+    #             loss = loss_vae + loss_recon * 10
+    #         # print(loss_vae.item(), loss_contr.item(), loss_recon.item())
+    #
+    #         loss.backward()
+    #
+    #         train_loss += loss.item()
+    #         VAE_loss += loss_vae.item()
+    #         contr_loss += loss_contr.item()
+    #         recon_loss += loss_recon.item()
+    #         mse_vae_loss += mse_vae.item()
+    #         kl_vae_loss_ += kl_vae.item()
+    #
+    #         self.optimizer.step()
+    #
+    #     self.writer.add_scalar("Train/Total_loss", train_loss / len(self.loader), epoch)
+    #     self.writer.add_scalar("Train/loss_vae", VAE_loss / len(self.loader), epoch)
+    #     self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
+    #     self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
+    #     self.writer.add_scalar("Train/mse_vae", mse_vae_loss / len(self.loader), epoch)
+    #     self.writer.add_scalar("Train/kl_vae", kl_vae_loss_ / len(self.loader), epoch)
+    #     if epoch % 10 == 0: self.test_world_model(epoch)
+    #     return train_loss / len(self.loader)
 
-    def _train_end_to_end(self, epoch):
+    def _train_end_to_end_new(self, epoch):
         train_loss = 0
+        rec_z_loss = 0
         contr_loss = 0
         VAE_loss = 0
         recon_loss = 0
@@ -250,32 +320,45 @@ class Manager:
             act = act.to(self.device)
             next = next.to(self.device)
 
-            z_pos, mu_pos, log_var_pos = self.model.getZ(next)
             recon_batch, mu_data, log_var_data, z_data = self.model.reconstruct(data)
             emb_q = self.model.transitionZ(z_data, act)
             x_t1_hat = self.model.decode(emb_q)
 
-            l_pos = torch.sum(emb_q * z_pos, dim=1, keepdim=True)
-            l_neg = torch.mm(emb_q, z_data.t())
-            logits = torch.cat([l_pos, l_neg], dim=1)
-            positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
-
             loss_vae, mse_vae, kl_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
                                                                batch_idx + len(self.loader) * epoch)
+
             loss_recon = F.mse_loss(x_t1_hat, next, reduction='mean')
-            loss_contr = self.loss_function_contrastive(logits, positive_label)
 
             if self.contrastive:
+                with torch.no_grad():
+                    z_pos = self.model_vae.getZ(next)
+                    z_neg = self.model_vae.getZ(data)
+
+                l_pos = torch.sum(emb_q * z_pos, dim=1, keepdim=True)
+                l_neg = torch.mm(emb_q, z_neg.t())
+                logits = torch.cat([l_pos, l_neg], dim=1)
+                positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
+
+                loss_contr = self.loss_function_contrastive(logits, positive_label)
+
                 loss = loss_vae + loss_contr + loss_recon * 10
+                contr_loss += loss_contr.item()
             else:
-                loss = loss_vae + loss_recon * 10
+
+                with torch.no_grad():
+                    z_next, _, _ = self.model.getZ(next)
+
+                loss_rec_z = F.mse_loss(emb_q, z_next, reduction='mean')
+
+                loss = loss_vae + loss_recon * 10 + loss_rec_z
+                rec_z_loss += loss_rec_z.item()
             # print(loss_vae.item(), loss_contr.item(), loss_recon.item())
 
             loss.backward()
 
             train_loss += loss.item()
             VAE_loss += loss_vae.item()
-            contr_loss += loss_contr.item()
+
             recon_loss += loss_recon.item()
             mse_vae_loss += mse_vae.item()
             kl_vae_loss_ += kl_vae.item()
@@ -285,68 +368,14 @@ class Manager:
         self.writer.add_scalar("Train/Total_loss", train_loss / len(self.loader), epoch)
         self.writer.add_scalar("Train/loss_vae", VAE_loss / len(self.loader), epoch)
         self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
         self.writer.add_scalar("Train/mse_vae", mse_vae_loss / len(self.loader), epoch)
         self.writer.add_scalar("Train/kl_vae", kl_vae_loss_ / len(self.loader), epoch)
-        if epoch % 10 == 0: self.test_world_model(epoch)
-        return train_loss / len(self.loader)
 
-    def _train_end_to_end_target(self, epoch):
-        train_loss = 0
-        contr_loss = 0
-        VAE_loss = 0
-        recon_loss = 0
-        mse_vae_loss = 0
-        kl_vae_loss_ = 0
+        if self.contrastive:
+            self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
+        else:
+            self.writer.add_scalar("Train/loss_rec_z", rec_z_loss / len(self.loader), epoch)
 
-        for batch_idx, (data, act, next, _) in enumerate(self.loader):
-            self.optimizer.zero_grad()
-            data = data.to(self.device)
-            act = act.to(self.device)
-            next = next.to(self.device)
-
-            recon_batch, mu_data, log_var_data, z_data = self.model.reconstruct(data)
-            emb_q = self.model.transitionZ(z_data, act)
-            x_t1_hat = self.model.decode(emb_q)
-
-            with torch.no_grad():
-                z_pos = self.model_vae.getZ(next)
-                z_neg = self.model_vae.getZ(data)
-
-            l_pos = torch.sum(emb_q * z_pos, dim=1, keepdim=True)
-            l_neg = torch.mm(emb_q, z_neg.t())
-            logits = torch.cat([l_pos, l_neg], dim=1)
-            positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
-
-            loss_vae, mse_vae, kl_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
-                                                               batch_idx + len(self.loader) * epoch)
-            loss_recon = F.mse_loss(x_t1_hat, next,
-                                    reduction='mean')  # self.weighted_mse_loss(x_t1_hat, next, weight)  #
-            loss_contr = self.loss_function_contrastive(logits, positive_label)
-
-            if self.contrastive:
-                loss = loss_vae + loss_contr + loss_recon * 10
-            else:
-                loss = loss_vae + loss_recon * 10
-            # print(loss_vae.item(), loss_contr.item(), loss_recon.item())
-
-            loss.backward()
-
-            train_loss += loss.item()
-            VAE_loss += loss_vae.item()
-            contr_loss += loss_contr.item()
-            recon_loss += loss_recon.item()
-            mse_vae_loss += mse_vae.item()
-            kl_vae_loss_ += kl_vae.item()
-
-            self.optimizer.step()
-
-        self.writer.add_scalar("Train/Total_loss", train_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/loss_vae", VAE_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/mse_vae", mse_vae_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/kl_vae", kl_vae_loss_ / len(self.loader), epoch)
         if epoch % 10 == 0: self.test_world_model(epoch)
         return train_loss / len(self.loader)
 
@@ -523,12 +552,9 @@ class Manager:
         replay_buffer.convert_D4RL(self.dataset_rl)
         mean, std = replay_buffer.normalize_states()
 
-
         policy = TD3_BC_WM(state_dim=self.env.observation_space.shape[0], action_dim=self.env.action_space.shape[0],
                            max_action=max_action, world_model=self.model, aug_type=aug, writer=self.writer,
                            device=self.device)
-
-
 
         for t in range(500000):
             policy.train(replay_buffer, batch_size=256)
@@ -551,7 +577,7 @@ class Manager:
         for idx in np.array_split(np.arange(len(self.dataset_rl['observations'])), 100):
             obs = torch.Tensor(self.dataset_rl['observations'][idx])
 
-            obs -= mean  # obs = (obs - mean) / std
+            obs = (obs - mean) / std
             act = torch.Tensor(self.dataset_rl['actions'][idx])
             reward = torch.Tensor(self.dataset_rl['rewards'][idx])
             terminal = torch.Tensor(self.dataset_rl['terminals'][idx])
@@ -620,7 +646,7 @@ class Manager:
             prediction = torch.cat([prediction, prediction_itr])
 
         prediction = prediction.cpu().detach().numpy()
-        prediction += mean  # prediction = (prediction * std) + mean
+        prediction = (prediction * std) + mean
 
         self.dataset_rl['next_observations'][self.corrupted_index] = prediction
 
