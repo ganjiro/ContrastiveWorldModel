@@ -1,9 +1,19 @@
+import io
+import random
+from collections import namedtuple, deque
+
+import PIL.Image
 import numpy as np
 import torch
 import copy
+
+from matplotlib import pyplot as plt
+from scipy.special.cython_special import hyp0f1
 from torch import nn
 import torch.nn.functional as F
 import gym
+from torch.cuda import device
+from torchvision.transforms import ToTensor
 
 
 class Actor(nn.Module):
@@ -64,7 +74,9 @@ class TD3_BC_WM(object):
             action_dim,
             max_action,
             world_model,
-            aug_type=0,  # 0 no aug, 1 perc batch size, 2 over estimation bias, 3 noise
+            aug_type=0,
+            # 0 no aug, 1 perc batch size, 2 over estimation bias, 3 noise, 4 S4rl,  5 batch REW # 6 S4RL Rew
+            # 7 Clipping # 8 mia idea # 9 azione
             discount=0.99,
             tau=0.005,
             policy_noise=0.2,
@@ -72,7 +84,8 @@ class TD3_BC_WM(object):
             policy_freq=2,
             alpha=2.5,
             device='cpu',
-            writer=None
+            writer=None,
+            eps=1,  # clipping eps
     ):
 
         self.actor = Actor(state_dim, action_dim, max_action).to(device)
@@ -92,25 +105,35 @@ class TD3_BC_WM(object):
         self.alpha = alpha
         self.device = device
         self.writer = writer
-
+        self.eps = eps
         self.total_it = 0
 
         self.aug_type = aug_type
         self.world_model = world_model
 
+        if self.aug_type == 8:
+            self.replay_memory = ReplayMemory(20000)
+
+        self.prob = 0.0
+
     def select_action(self, state):
         state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
         return self.actor(state).cpu().data.numpy().flatten()
 
-    def train(self, replay_buffer, batch_size=256, perc=0.5):
+    def train(self, replay_buffer, batch_size=256, hyperparameter=0.5, writer=None):
         self.total_it += 1
+
+        self.prob += 1 / (500000 * 5)
+
+        if not self.total_it % 10000 and writer and self.world_model:
+            self.test_distr(replay_buffer, writer)
 
         # Sample replay buffer
         state, action, next_state, reward, not_done = replay_buffer.sample(batch_size)
 
-        if self.aug_type == 1:
+        if self.aug_type == 1 and hyperparameter > 0.001:
             to_aug = np.random.choice(len(next_state),
-                                      int(len(next_state) * perc), replace=False)
+                                      int(len(next_state) * hyperparameter), replace=False)
 
             with torch.no_grad():
                 next_state_aug = self.world_model(state, action)
@@ -119,15 +142,57 @@ class TD3_BC_WM(object):
 
         elif self.aug_type == 3:
             to_aug = np.random.choice(len(next_state),
-                                      int(len(next_state) * perc), replace=False)
+                                      int(len(next_state) * hyperparameter), replace=False)
 
             next_state[to_aug] = next_state[to_aug] + torch.randn_like(next_state[to_aug]) / 10
 
-        # state = torch.cat([state, state])
-        # action = torch.cat([action, action])
-        # reward = torch.cat([reward, reward])
-        # not_done = torch.cat([not_done, not_done])
-        # next_state = torch.cat([next_state, next_state_aug])
+        elif self.aug_type == 5:
+            to_aug = np.random.choice(len(next_state),
+                                      int(len(next_state) * hyperparameter), replace=False)
+
+            with torch.no_grad():
+                next_state_aug, reward_aug = self.world_model(state, action)
+
+            next_state[to_aug] = next_state_aug[to_aug]
+            reward[to_aug] = reward_aug[to_aug]
+
+        elif self.aug_type == 8:
+
+            states_toaug = replay_buffer.sample_state(64)
+
+            with torch.no_grad():
+                action_toaug = self.actor(states_toaug)
+
+                next_state_aug, reward_aug = self.world_model(states_toaug, action_toaug)
+
+            not_done_aug = torch.full([64, 1], 1, device=self.device)
+
+            self.replay_memory.push(states_toaug, action_toaug, next_state_aug, reward_aug, not_done_aug)
+
+            if random.random() < self.prob:
+                batch = self.replay_memory.sample(32)
+                for transition in batch:
+                    state = torch.cat([state, transition.state])
+                    action = torch.cat([action, transition.action])
+                    next_state = torch.cat([next_state, transition.next_state])
+                    reward = torch.cat([reward, transition.reward])
+                    not_done = torch.cat([not_done, transition.done])
+
+        elif self.aug_type == 9:
+            to_aug = np.random.choice(len(next_state),
+                                      int(len(next_state) * hyperparameter), replace=False)
+
+            noise = (torch.randn_like(action[to_aug]) * 0.05
+                     ).clamp(-self.noise_clip, self.noise_clip)
+
+            action_aug = (action[to_aug] + noise
+                          ).clamp(-self.max_action, self.max_action)
+
+            with torch.no_grad():
+                next_state_aug = self.world_model(state[to_aug], action_aug)
+
+            next_state[to_aug] = next_state_aug
+            action[to_aug] = action_aug
 
         with torch.no_grad():
             # Select action according to policy and add clipped noise
@@ -149,57 +214,77 @@ class TD3_BC_WM(object):
                         self.actor_target(next_state_aug) + noise
                 ).clamp(-self.max_action, self.max_action)
 
-                target_Q1_aug, target_Q2_aug = self.critic_target(next_state_aug, next_action_aug)
+                target_Q1_aug, target_Q2_aug = self.critic_target(next_state_aug, next_action)
 
                 target_Q = torch.min(target_Q1, target_Q2)
                 target_Q_aug = torch.min(target_Q1_aug, target_Q2_aug)
                 target_Q = torch.min(target_Q, target_Q_aug)
 
+
             elif self.aug_type == 4:
 
                 next_state_aug_0 = self.world_model(state, action)
-                # next_state_aug_1 = self.world_model(state, action)
-                # next_state_aug_2 = self.world_model(state, action)
+                next_state_aug_1 = self.world_model(state, action)
 
-                next_action_aug_0 = (
-                        self.actor_target(next_state_aug_0) + noise
-                ).clamp(-self.max_action, self.max_action)
-                # next_action_aug_1 = (
-                #         self.actor_target(next_state_aug_1) + noise
-                # ).clamp(-self.max_action, self.max_action)
-                # next_action_aug_2 = (
-                #         self.actor_target(next_state_aug_2) + noise
-                # ).clamp(-self.max_action, self.max_action)
+                target_Q1_aug_0, target_Q2_aug_0 = self.critic_target(next_state_aug_0, next_action)
+                target_Q1_aug_1, target_Q2_aug_1 = self.critic_target(next_state_aug_1, next_action)
 
-                target_Q1_aug_0, target_Q2_aug_0 = self.critic_target(next_state_aug_0, next_action_aug_0)
-                # target_Q1_aug_1, target_Q2_aug_1 = self.critic_target(next_state_aug_1, next_action_aug_1)
-                # target_Q1_aug_2, target_Q2_aug_2 = self.critic_target(next_state_aug_2, next_action_aug_2)
+                target_Q1 = target_Q1 * hyperparameter
+                target_Q2 = target_Q2 * hyperparameter
 
+                target_Q1_aug_0 = target_Q1_aug_0 * (1 - (hyperparameter / 2))
+                target_Q2_aug_0 = target_Q2_aug_0 * (1 - (hyperparameter / 2))
+
+                target_Q1_aug_1 = target_Q1_aug_1 * (1 - (hyperparameter / 2))
+                target_Q2_aug_1 = target_Q2_aug_1 * (1 - (hyperparameter / 2))
+
+                target_Q1 = torch.mean(torch.cat([target_Q1, target_Q1_aug_0, target_Q1_aug_1]))
+                target_Q2 = torch.mean(torch.cat([target_Q2, target_Q2_aug_0, target_Q2_aug_1]))
+
+                target_Q = torch.min(target_Q1, target_Q2)
+
+            elif self.aug_type == 7:
+
+                next_state_aug_0 = self.world_model(state, action)
+
+                target_Q1_aug_0, target_Q2_aug_0 = self.critic_target(next_state_aug_0, next_action)
+
+                target_Q1 = torch.mean(torch.cat([target_Q1, target_Q1_aug_0])).clamp(min=target_Q1 - self.eps,
+                                                                                      max=target_Q1 + self.eps)
+                target_Q2 = torch.mean(torch.cat([target_Q2, target_Q2_aug_0])).clamp(min=target_Q2 - self.eps,
+                                                                                      max=target_Q2 + self.eps)
+
+                target_Q = torch.min(target_Q1, target_Q2)
+
+
+            elif self.aug_type != 6:
+
+                target_Q = torch.min(target_Q1, target_Q2)
+
+            if self.aug_type == 6:
+                next_state_aug_0, reward_aug = self.world_model(state, action)
+
+                target_Q1_aug_0, target_Q2_aug_0 = self.critic_target(next_state_aug_0, next_action)
                 target_Q1 = torch.mean(torch.cat([target_Q1, target_Q1_aug_0]))
                 target_Q2 = torch.mean(torch.cat([target_Q2, target_Q2_aug_0]))
 
+                reward = (reward + reward_aug) / 2
                 target_Q = torch.min(target_Q1, target_Q2)
 
+                target_Q = reward + not_done * self.discount * target_Q
             else:
 
-                target_Q = torch.min(target_Q1, target_Q2)
-
-            target_Q = reward + not_done * self.discount * target_Q
+                target_Q = reward + not_done * self.discount * target_Q
 
         # Get current Q estimates
         current_Q1, current_Q2 = self.critic(state, action)
 
         # Compute critic loss
-        if self.aug_type == 2:
-            critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q) + (
-                    F.mse_loss(target_Q1_aug, target_Q1) + F.mse_loss(target_Q2_aug, target_Q2)) / F.mse_loss(
-                next_state_aug, next_state)
-        else:
-            critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
+        critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
 
         # Optimize the critic
         self.critic_optimizer.zero_grad()
-        critic_loss.backward()
+        critic_loss.backward(retain_graph=True)
         self.critic_optimizer.step()
 
         # Delayed policy updates
@@ -214,7 +299,7 @@ class TD3_BC_WM(object):
 
             # Optimize the actor
             self.actor_optimizer.zero_grad()
-            actor_loss.backward()
+            actor_loss.backward(retain_graph=True)
             self.actor_optimizer.step()
 
             # Update the frozen target models
@@ -242,6 +327,77 @@ class TD3_BC_WM(object):
         self.actor.load_state_dict(torch.load(filename + "_actor"))
         self.actor_optimizer.load_state_dict(torch.load(filename + "_actor_optimizer"))
         self.actor_target = copy.deepcopy(self.actor)
+
+    def test_distr(self, replay_buffer, writer, batch_size=1024):
+
+        state, action, next_state, reward, not_done = replay_buffer.sample(batch_size)
+
+        with torch.no_grad():
+            noise = (
+                    torch.randn_like(action) * self.policy_noise
+            ).clamp(-self.noise_clip, self.noise_clip)
+
+            next_action = (
+                    self.actor_target(next_state) + noise
+            ).clamp(-self.max_action, self.max_action)
+
+            # Compute the target Q value
+            target_Q1, target_Q2 = self.critic_target(next_state, next_action)
+
+            if self.aug_type == 5 or self.aug_type == 6 or self.aug_type == 8:
+                next_state_aug, _ = self.world_model(state, action)
+            else:
+                next_state_aug = self.world_model(state, action)
+
+            aug_target_Q1, aug_target_Q2 = self.critic_target(next_state_aug, next_action)
+
+            diff_1 = target_Q1 - aug_target_Q1
+            diff_2 = target_Q2 - aug_target_Q2
+
+        diff_distr = torch.cat([diff_1, diff_2]).detach().cpu()
+
+        diff_distr = torch.where(diff_distr > 200, 200, diff_distr)
+        diff_distr = torch.where(diff_distr < -200, -200, diff_distr)
+        # plt.hist(mse_distr, bins=100)
+        # plt.ylim([0, 6000])
+
+        # buf = io.BytesIO()
+        # plt.savefig(buf, format='jpeg')
+        # buf.seek(0)
+        # image = PIL.Image.open(buf)
+        #
+        # image = ToTensor()(image).unsqueeze(0)
+
+        mse_states = F.mse_loss(next_state_aug, next_state, reduction='none').detach().cpu().sum(1)
+        mse_states = torch.cat([mse_states, mse_states])
+
+        plt.scatter(mse_states, diff_distr)
+        plt.ylabel("Q(S') - Q(S'WM)")
+        plt.xlabel("MSE(S', S'WM)")
+        # plt.savefig(writer, "distr_" + str(self.total_it) + ".png")
+
+        writer.add_figure("Plot Distr", plt.gcf(), self.total_it)
+
+        writer.add_histogram('Distr Q-Value', diff_distr, self.total_it, max_bins=1000)
+
+
+Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'done'))
+
+
+class ReplayMemory(object):
+
+    def __init__(self, capacity):
+        self.memory = deque([], maxlen=capacity)
+
+    def push(self, *args):
+        """ Save a transition """
+        self.memory.append(Transition(*args))
+
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+
+    def __len__(self):
+        return len(self.memory)
 
 
 class ReplayBuffer(object):
@@ -279,6 +435,10 @@ class ReplayBuffer(object):
             torch.FloatTensor(self.reward[ind]).to(self.device),
             torch.FloatTensor(self.not_done[ind]).to(self.device)
         )
+
+    def sample_state(self, size):
+        ind = np.random.randint(0, self.size, size=size)
+        return torch.FloatTensor(self.state[ind]).to(self.device)
 
     def convert_D4RL(self, dataset):
         self.state = dataset['observations']

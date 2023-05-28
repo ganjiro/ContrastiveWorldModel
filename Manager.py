@@ -8,15 +8,16 @@ from torch.utils.data import DataLoader
 
 from DatasetBuilder import D4RLDataset  # D4RLDatasetTest
 from Models import Contrastive_world_model_end_to_end, VAE, \
-    ContrastiveHead  # , Contrastive_world_model_end_to_end_reward
+    ContrastiveHead, Contrastive_world_model_end_to_end_reward
 
 from TD3_BC_WM import TD3_BC_WM, ReplayBuffer, eval_policy
+from test_TD3 import TD3_BC_TEST
 
 os.environ["D4RL_SUPPRESS_IMPORT_ERROR"] = "1"
-os.environ["LD_LIBRARY_PATH"] += ":/home/gmacaluso/.mujoco/mujoco210/bin:/home/gmacaluso/miniconda3/lib"
+os.environ["LD_LIBRARY_PATH"] = ":/home/gmacaluso/.mujoco/mujoco210/bin:/home/gmacaluso/miniconda3/lib"
 
-import d4rl.gym_bullet
-import d4rl.gym_mujoco
+import d4rl
+
 import gym
 
 import torch.nn as nn
@@ -31,8 +32,8 @@ from datetime import datetime
 class Manager:
 
     def __init__(self, model_name, env_name, perc=0.3, savepath=None, contrastive=True, writer_name="Manager",
-                 test_aug=False, dimension=None, entire_trajectory=True, test_name=""):
-        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+                 test_aug=False, dimension=None, entire_trajectory=True, test_name="", std_reward=False, all_dataset=False):
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.savepath = savepath
         self.model_name = model_name
         self.env_name = env_name
@@ -45,10 +46,12 @@ class Manager:
         if not os.path.exists(savepath):
             os.mkdir(savepath)
 
-        if self.entire_trajectory and not dimension:
+        if all_dataset:
+            self.dataset_contr, self.dataset_rl, self.dataset_test, dimension = self.create_complete_dataset(
+            )
+        elif self.entire_trajectory and not dimension:
             self.dataset_contr, self.dataset_rl, self.dataset_test, dimension = self.create_full_dataset(
                 self.env.get_dataset())
-
         elif self.test_aug:
             self.dataset_contr, self.dataset_rl, self.dataset_test = self.create_dataset_test_aug(
                 self.env.get_dataset(), dimension)
@@ -56,8 +59,10 @@ class Manager:
             self.dataset_contr, self.dataset_rl, self.dataset_test, self.corrupted_index = self.create_datasets(
                 self.env.get_dataset(), dimension, perc)
 
-        self.loader = DataLoader(D4RLDataset(self.dataset_contr), batch_size=4096, shuffle=True, num_workers=8)
-        self.test_loader = DataLoader(D4RLDataset(self.dataset_test), batch_size=500, shuffle=True, num_workers=8)
+        self.loader = DataLoader(D4RLDataset(self.dataset_contr, std_reward), batch_size=4096, shuffle=True,
+                                 num_workers=8)
+        self.test_loader = DataLoader(D4RLDataset(self.dataset_test, std_reward), batch_size=500, shuffle=True,
+                                      num_workers=8)
 
         self.writer_name = test_name + '_' + self.model_name + \
                            ('_testaug' if self.test_aug else '') + (
@@ -76,46 +81,55 @@ class Manager:
                                                             z_dim=12, action_dim=self.env.action_space.shape[0],
                                                             hidden_dim_head=300).to(self.device)
 
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-5)
 
             self.train_fn = self._train_end_to_end_new
 
             if self.contrastive:
                 self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=500, z_dim=12).to(
                     self.device)
-                self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-3)
+                self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-4)
                 self.loaded_vae = False
 
-        # elif model_name == "reward":
-        #     self.model = Contrastive_world_model_end_to_end_reward(input_dim=17, hidden_dim=500, z_dim=12, action_dim=6,
-        #                                                     hidden_dim_head=300).to(self.device)
+        elif model_name == "reward":
+            self.model = Contrastive_world_model_end_to_end_reward(input_dim=self.env.observation_space.shape[0],
+                                                                   hidden_dim=500,
+                                                                   z_dim=12, action_dim=self.env.action_space.shape[0],
+                                                                   hidden_dim_head=300).to(self.device)
+
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-5)
+
+            self.train_fn = self._train_end_to_end_reward
+
+            if self.contrastive:
+                self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=500, z_dim=12).to(
+                    self.device)
+                self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-4)
+                self.loaded_vae = False
+
+        # elif model_name == "splitted":
         #
-        #     self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
+        #     self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=500, z_dim=12).to(
+        #         self.device)
+        #     self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-3)
+        #     self.loaded_vae = False
         #
-        #     self.train_fn = self._train_end_to_end_reward
-
-        elif model_name == "splitted":
-
-            self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=500, z_dim=12).to(
-                self.device)
-            self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-3)
-            self.loaded_vae = False
-
-            self.model_contr = ContrastiveHead(z_dim=12, action_dim=self.env.action_space.shape[0], hidden_dim=300).to(
-                self.device)
-            self.optimizer_contr = torch.optim.Adam(self.model_contr.parameters(), lr=1e-4)
-
-            self.train_fn = self._train_splitted
+        #     self.model_contr = ContrastiveHead(z_dim=12, action_dim=self.env.action_space.shape[0], hidden_dim=300).to(
+        #         self.device)
+        #     self.optimizer_contr = torch.optim.Adam(self.model_contr.parameters(), lr=1e-4)
+        #
+        #     self.train_fn = self._train_splitted
         else:
             self.model = None
 
     def load(self, load_path):
         if self.model_name == "end_to_end":
             self.model = torch.load(
-                os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
+                os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"),
+                map_location='cuda:0')
             if self.contrastive:
                 self.loaded_vae = True
-                self.model_vae = torch.load(os.path.join(load_path, "VAE.pt")).to(self.device)
+                self.model_vae = torch.load(os.path.join(load_path, "VAE.pt"), map_location='cuda:0').to(self.device)
 
                 self.model_vae.eval()
 
@@ -128,13 +142,13 @@ class Manager:
 
     def load_vae(self, load_path):
         self.loaded_vae = True
-        self.model_vae = torch.load(os.path.join(load_path, "VAE.pt"))
+        self.model_vae = torch.load(os.path.join(load_path, "VAE.pt")).to(self.device)
         self.model_vae.eval()
 
     def train(self, epochs):
         if (self.model_name == "splitted" and not self.loaded_vae) or (self.contrastive and not self.loaded_vae):
             self.model_vae.train()
-            self._train_vae(500)
+            self._train_vae(200)
             self.model_vae.eval()
 
         for epoch in range(epochs):
@@ -187,6 +201,13 @@ class Manager:
         return dataset_wl_rl, dataset, dataset_test
 
     def create_datasets(self, dataset, dimension, perc):  # todo forse queste deep copy sono useless
+
+        try:
+            dataset['next_observations']
+        except:
+            dataset['next_observations'] = np.append(dataset['observations'][1:],
+                                                     np.expand_dims(dataset['observations'][1], axis=0), axis=0)
+
         np.random.seed(42)
 
         if self.entire_trajectory:
@@ -201,7 +222,7 @@ class Manager:
         index_wl_rl = index[:dimension]
 
         dataset['actions'] = dataset['actions'][index_wl_rl]
-        dataset['infos/action_log_probs'] = dataset['infos/action_log_probs'][index_wl_rl]
+        # dataset['infos/action_log_probs'] = dataset['infos/action_log_probs'][index_wl_rl]
         dataset['next_observations'] = dataset['next_observations'][index_wl_rl]
         dataset['observations'] = dataset['observations'][index_wl_rl]
         dataset['rewards'] = dataset['rewards'][index_wl_rl]
@@ -209,7 +230,7 @@ class Manager:
         dataset['timeouts'] = dataset['timeouts'][index_wl_rl]
 
         dataset_test['actions'] = dataset_test['actions'][index_test]
-        dataset_test['infos/action_log_probs'] = dataset_test['infos/action_log_probs'][index_test]
+        # dataset_test['infos/action_log_probs'] = dataset_test['infos/action_log_probs'][index_test]
         dataset_test['next_observations'] = dataset_test['next_observations'][index_test]
         dataset_test['observations'] = dataset_test['observations'][index_test]
         dataset_test['rewards'] = dataset_test['rewards'][index_test]
@@ -222,24 +243,109 @@ class Manager:
         dataset_contr = copy.deepcopy(dataset)
 
         dataset_contr['actions'] = np.delete(dataset_contr['actions'], to_corrupt, axis=0)
-        dataset_contr['infos/action_log_probs'] = np.delete(dataset_contr['infos/action_log_probs'], to_corrupt, axis=0)
+        # dataset_contr['infos/action_log_probs'] = np.delete(dataset_contr['infos/action_log_probs'], to_corrupt, axis=0)
         dataset_contr['next_observations'] = np.delete(dataset_contr['next_observations'], to_corrupt, axis=0)
         dataset_contr['observations'] = np.delete(dataset_contr['observations'], to_corrupt, axis=0)
         dataset_contr['rewards'] = np.delete(dataset_contr['rewards'], to_corrupt, axis=0)
         dataset_contr['terminals'] = np.delete(dataset_contr['terminals'], to_corrupt, axis=0)
         dataset_contr['timeouts'] = np.delete(dataset_contr['timeouts'], to_corrupt, axis=0)
 
+        index = np.concatenate(
+            (np.where(dataset_contr['timeouts'] == True), np.where(dataset_contr['terminals'] == True)), axis=1)
+
+        dataset_contr['actions'] = np.delete(dataset_contr['actions'], index, axis=0)
+        dataset_contr['observations'] = np.delete(dataset_contr['observations'], index, axis=0)
+        dataset_contr['next_observations'] = np.delete(dataset_contr['next_observations'], index, axis=0)
+        dataset_contr['rewards'] = np.delete(dataset_contr['rewards'], index, axis=0)
+        dataset_contr['terminals'] = np.delete(dataset_contr['terminals'], index, axis=0)
+        dataset_contr['timeouts'] = np.delete(dataset_contr['timeouts'], index, axis=0)
+
         return dataset_contr, dataset, dataset_test, to_corrupt
 
+    def create_new_scenario_dataset(self, dataset, dimension, entire_trajectory=False):
+
+        try:
+            dataset['next_observations']
+        except:
+            dataset['next_observations'] = np.append(dataset['observations'][1:],
+                                                     np.expand_dims(dataset['observations'][1], axis=0), axis=0)
+
+        np.random.seed(42)
+
+        if entire_trajectory:
+            index = [i * 1000 + j for i in np.random.permutation(int(len(dataset['next_observations']) / 1000)) for j in
+                     range(1000)]
+        else:
+            index = np.random.permutation(int(len(dataset['next_observations'])))
+
+        index_wl_rl = index[:dimension]
+
+        dataset['actions'] = dataset['actions'][index_wl_rl]
+        dataset['infos/action_log_probs'] = dataset['infos/action_log_probs'][index_wl_rl]
+        dataset['next_observations'] = dataset['next_observations'][index_wl_rl]
+        dataset['observations'] = dataset['observations'][index_wl_rl]
+        dataset['rewards'] = dataset['rewards'][index_wl_rl]
+        dataset['terminals'] = dataset['terminals'][index_wl_rl]
+        dataset['timeouts'] = dataset['timeouts'][index_wl_rl]
+
+        return dataset
+
     def create_full_dataset(self, dataset):
+
+        try:
+            dataset['next_observations']
+        except:
+            dataset['next_observations'] = np.append(dataset['observations'][1:],
+                                                     np.expand_dims(dataset['observations'][1], axis=0), axis=0)
 
         dataset_test = copy.deepcopy(dataset)
         dataset_contr = copy.deepcopy(dataset)
 
         dataset_test['actions'] = dataset_test['actions'][-20000:]
-        dataset_test['infos/action_log_probs'] = dataset_test['infos/action_log_probs'][-20000:]
-        dataset_test['next_observations'] = dataset_test['next_observations'][-20000:]
         dataset_test['observations'] = dataset_test['observations'][-20000:]
+        dataset_test['next_observations'] = dataset_test['next_observations'][-20000:]
+        dataset_test['rewards'] = dataset_test['rewards'][-20000:]
+        dataset_test['terminals'] = dataset_test['terminals'][-20000:]
+        dataset_test['timeouts'] = dataset_test['timeouts'][-20000:]
+
+        index = np.concatenate(
+            (np.where(dataset_contr['timeouts'] == True), np.where(dataset_contr['terminals'] == True)), axis=1)
+
+        dataset_contr['actions'] = np.delete(dataset_contr['actions'], index, axis=0)
+        dataset_contr['observations'] = np.delete(dataset_contr['observations'], index, axis=0)
+        dataset_contr['next_observations'] = np.delete(dataset_contr['next_observations'], index, axis=0)
+        dataset_contr['rewards'] = np.delete(dataset_contr['rewards'], index, axis=0)
+        dataset_contr['terminals'] = np.delete(dataset_contr['terminals'], index, axis=0)
+        dataset_contr['timeouts'] = np.delete(dataset_contr['timeouts'], index, axis=0)
+
+        return dataset_contr, dataset, dataset_test, len(dataset['actions'])
+
+    def create_complete_dataset(self):
+        env = gym.make("halfcheetah-medium-replay-v2")
+        dataset_mr = env.get_dataset()
+        env = gym.make("halfcheetah-medium-expert-v2")
+        dataset_me = env.get_dataset()
+        env = gym.make("halfcheetah-random-v2")
+        dataset_r = env.get_dataset()
+
+        dataset = {}
+
+        dataset['actions'] = np.concatenate((dataset_mr['actions'], dataset_me['actions'], dataset_r['actions']))
+        dataset['observations'] = np.concatenate(
+            (dataset_mr['observations'], dataset_me['observations'], dataset_r['observations']))
+        dataset['next_observations'] = np.concatenate(
+            (dataset_mr['next_observations'], dataset_me['next_observations'], dataset_r['next_observations']))
+        dataset['rewards'] = np.concatenate((dataset_mr['rewards'], dataset_me['rewards'], dataset_r['rewards']))
+        dataset['terminals'] = np.concatenate(
+            (dataset_mr['terminals'], dataset_me['terminals'], dataset_r['terminals']))
+        dataset['timeouts'] = np.concatenate((dataset_mr['timeouts'], dataset_me['timeouts'], dataset_r['timeouts']))
+
+        dataset_test = copy.deepcopy(dataset)
+        dataset_contr = copy.deepcopy(dataset)
+
+        dataset_test['actions'] = dataset_test['actions'][-20000:]
+        dataset_test['observations'] = dataset_test['observations'][-20000:]
+        dataset_test['next_observations'] = dataset_test['next_observations'][-20000:]
         dataset_test['rewards'] = dataset_test['rewards'][-20000:]
         dataset_test['terminals'] = dataset_test['terminals'][-20000:]
         dataset_test['timeouts'] = dataset_test['timeouts'][-20000:]
@@ -249,61 +355,6 @@ class Manager:
     def close_writer(self):
         self.writer.flush()
         self.writer.close()
-
-    # def _train_end_to_end(self, epoch):
-    #     train_loss = 0
-    #     contr_loss = 0
-    #     VAE_loss = 0
-    #     recon_loss = 0
-    #     mse_vae_loss = 0
-    #     kl_vae_loss_ = 0
-    #
-    #     for batch_idx, (data, act, next, _) in enumerate(self.loader):
-    #         self.optimizer.zero_grad()
-    #         data = data.to(self.device)
-    #         act = act.to(self.device)
-    #         next = next.to(self.device)
-    #
-    #         z_pos, mu_pos, log_var_pos = self.model.getZ(next)
-    #         recon_batch, mu_data, log_var_data, z_data = self.model.reconstruct(data)
-    #         emb_q = self.model.transitionZ(z_data, act)
-    #         x_t1_hat = self.model.decode(emb_q)
-    #
-    #         l_pos = torch.sum(emb_q * z_pos, dim=1, keepdim=True)
-    #         l_neg = torch.mm(emb_q, z_data.t())
-    #         logits = torch.cat([l_pos, l_neg], dim=1)
-    #         positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
-    #
-    #         loss_vae, mse_vae, kl_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
-    #                                                            batch_idx + len(self.loader) * epoch)
-    #         loss_recon = F.mse_loss(x_t1_hat, next, reduction='mean')
-    #         loss_contr = self.loss_function_contrastive(logits, positive_label)
-    #
-    #         if self.contrastive:
-    #             loss = loss_vae + loss_contr + loss_recon * 10
-    #         else:
-    #             loss = loss_vae + loss_recon * 10
-    #         # print(loss_vae.item(), loss_contr.item(), loss_recon.item())
-    #
-    #         loss.backward()
-    #
-    #         train_loss += loss.item()
-    #         VAE_loss += loss_vae.item()
-    #         contr_loss += loss_contr.item()
-    #         recon_loss += loss_recon.item()
-    #         mse_vae_loss += mse_vae.item()
-    #         kl_vae_loss_ += kl_vae.item()
-    #
-    #         self.optimizer.step()
-    #
-    #     self.writer.add_scalar("Train/Total_loss", train_loss / len(self.loader), epoch)
-    #     self.writer.add_scalar("Train/loss_vae", VAE_loss / len(self.loader), epoch)
-    #     self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
-    #     self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
-    #     self.writer.add_scalar("Train/mse_vae", mse_vae_loss / len(self.loader), epoch)
-    #     self.writer.add_scalar("Train/kl_vae", kl_vae_loss_ / len(self.loader), epoch)
-    #     if epoch % 10 == 0: self.test_world_model(epoch)
-    #     return train_loss / len(self.loader)
 
     def _train_end_to_end_new(self, epoch):
         train_loss = 0
@@ -379,48 +430,127 @@ class Manager:
         if epoch % 10 == 0: self.test_world_model(epoch)
         return train_loss / len(self.loader)
 
-    def _train_splitted(self, epoch):
+    def _train_end_to_end_reward(self, epoch):
         train_loss = 0
+        rec_z_loss = 0
         contr_loss = 0
+        VAE_loss = 0
         recon_loss = 0
-        for batch_idx, (data, act, next, _) in enumerate(self.loader):
-            self.optimizer_contr.zero_grad()
+        mse_vae_loss = 0
+        kl_vae_loss_ = 0
+        reward_loss = 0
 
+        for batch_idx, (data, act, next, reward) in enumerate(self.loader):
+            self.optimizer.zero_grad()
             data = data.to(self.device)
             act = act.to(self.device)
             next = next.to(self.device)
+            reward = reward.to(self.device)
 
-            emp_k_neg = self.model_vae.getZ(data)
-            emp_k_pos = self.model_vae.getZ(next)
+            recon_batch, mu_data, log_var_data, z_data = self.model.reconstruct(data)
+            emb_q, pred_reward = self.model.transitionZ(z_data, act)
+            x_t1_hat = self.model.decode(emb_q)
 
-            emb_q = self.model_contr(emp_k_neg, act)
+            loss_vae, mse_vae, kl_vae = self.loss_function_vae(recon_batch, data, mu_data, log_var_data,
+                                                               batch_idx + len(self.loader) * epoch)
 
-            x_t1_hat = self.model_vae.decode(emb_q)
+            loss_recon = F.mse_loss(x_t1_hat, next, reduction='mean')
 
-            l_pos = torch.sum(emb_q * emp_k_pos, dim=1, keepdim=True)
-            l_neg = torch.mm(emb_q, emp_k_neg.t())
-            logits = torch.cat([l_pos, l_neg], dim=1)
+            loss_reward = F.mse_loss(pred_reward.squeeze(), reward, reduction='mean')
 
-            positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
-            loss_recon = F.huber_loss(x_t1_hat, next, reduction='mean')
-            loss_contr = self.loss_function_contrastive(logits / 0.2, positive_label)
             if self.contrastive:
-                loss = loss_contr + loss_recon
+                with torch.no_grad():
+                    z_pos = self.model_vae.getZ(next)
+                    z_neg = self.model_vae.getZ(data)
+
+                l_pos = torch.sum(emb_q * z_pos, dim=1, keepdim=True)
+                l_neg = torch.mm(emb_q, z_neg.t())
+                logits = torch.cat([l_pos, l_neg], dim=1)
+                positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
+
+                loss_contr = self.loss_function_contrastive(logits, positive_label)
+
+                loss = loss_vae + loss_contr + loss_recon * 10 + loss_reward
+                contr_loss += loss_contr.item()
             else:
-                loss = loss_recon
-            # print(loss_contr.item(), loss_recon.item())
+
+                with torch.no_grad():
+                    z_next, _, _ = self.model.getZ(next)
+
+                loss_rec_z = F.mse_loss(emb_q, z_next, reduction='mean')
+
+                loss = loss_vae + loss_recon * 10 + loss_rec_z + loss_reward
+                rec_z_loss += loss_rec_z.item()
+            # print(loss_vae.item(), loss_contr.item(), loss_recon.item())
 
             loss.backward()
+
             train_loss += loss.item()
-            contr_loss += loss_contr.item()
+            VAE_loss += loss_vae.item()
+            reward_loss += loss_reward
             recon_loss += loss_recon.item()
-            self.optimizer_contr.step()
+            mse_vae_loss += mse_vae.item()
+            kl_vae_loss_ += kl_vae.item()
+
+            self.optimizer.step()
 
         self.writer.add_scalar("Train/Total_loss", train_loss / len(self.loader), epoch)
-        self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/loss_vae", VAE_loss / len(self.loader), epoch)
         self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/mse_vae", mse_vae_loss / len(self.loader), epoch)
+        self.writer.add_scalar("Train/kl_vae", kl_vae_loss_ / len(self.loader), epoch)
+        self.writer.add_scalar("Train/reward", reward_loss / len(self.loader), epoch)
+
+        if self.contrastive:
+            self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
+        else:
+            self.writer.add_scalar("Train/loss_rec_z", rec_z_loss / len(self.loader), epoch)
+
         if epoch % 10 == 0: self.test_world_model(epoch)
         return train_loss / len(self.loader)
+
+    # def _train_splitted(self, epoch):
+    #     train_loss = 0
+    #     contr_loss = 0
+    #     recon_loss = 0
+    #     for batch_idx, (data, act, next, _) in enumerate(self.loader):
+    #         self.optimizer_contr.zero_grad()
+    #
+    #         data = data.to(self.device)
+    #         act = act.to(self.device)
+    #         next = next.to(self.device)
+    #
+    #         emp_k_neg = self.model_vae.getZ(data)
+    #         emp_k_pos = self.model_vae.getZ(next)
+    #
+    #         emb_q = self.model_contr(emp_k_neg, act)
+    #
+    #         x_t1_hat = self.model_vae.decode(emb_q)
+    #
+    #         l_pos = torch.sum(emb_q * emp_k_pos, dim=1, keepdim=True)
+    #         l_neg = torch.mm(emb_q, emp_k_neg.t())
+    #         logits = torch.cat([l_pos, l_neg], dim=1)
+    #
+    #         positive_label = torch.zeros(logits.size(0), dtype=torch.long).to(self.device)
+    #         loss_recon = F.huber_loss(x_t1_hat, next, reduction='mean')
+    #         loss_contr = self.loss_function_contrastive(logits / 0.2, positive_label)
+    #         if self.contrastive:
+    #             loss = loss_contr + loss_recon
+    #         else:
+    #             loss = loss_recon
+    #         # print(loss_contr.item(), loss_recon.item())
+    #
+    #         loss.backward()
+    #         train_loss += loss.item()
+    #         contr_loss += loss_contr.item()
+    #         recon_loss += loss_recon.item()
+    #         self.optimizer_contr.step()
+    #
+    #     self.writer.add_scalar("Train/Total_loss", train_loss / len(self.loader), epoch)
+    #     self.writer.add_scalar("Train/loss_contr", contr_loss / len(self.loader), epoch)
+    #     self.writer.add_scalar("Train/loss_next", recon_loss / len(self.loader), epoch)
+    #     if epoch % 10 == 0: self.test_world_model(epoch)
+    #     return train_loss / len(self.loader)
 
     def _train_vae(self, epochs):
 
@@ -520,16 +650,18 @@ class Manager:
 
             dist_rec += F.mse_loss(recon_batch, data)
             dist_trans += F.mse_loss(trans_batch, next)
-            if self.model_name == "reward": dist_reward += F.mse_loss(reward_pred, reward)
+            if self.model_name == "reward": dist_reward += F.mse_loss(reward_pred.squeeze(), reward)
 
         self.writer.add_scalar("Test/MSE_Recon", dist_rec / len(self.test_loader), epoch)
         self.writer.add_scalar("Test/MSE_Trans", dist_trans / len(self.test_loader), epoch)
+        self.writer.add_scalar("Test/MSE_reward", dist_reward / len(self.test_loader), epoch)
 
         print('Recon Dist: {:.4f}'.format(dist_rec / len(self.test_loader)))
         print('Trans Dist: {:.4f}'.format(dist_trans / len(self.test_loader)))
 
-    def test_td3_bc(self, corr_type=0, aug=0):  # corr_type 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove;
-        # Aug 0 No aug; 1 Perc Batch; 2 Over esitmation # 3 noise # 4 S4rl
+    def test_td3_bc(self, corr_type=0, aug=0, eps=0,
+                    hyperparameter=None):  # corr_type 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove;
+        # Aug 0 No aug; 1 Perc Batch; 2 Over esitmation # 3 noise # 4 S4rl # 5 batch REW
         max_action = float(self.env.action_space.high[0])
 
         mean_ = self.dataset_rl["observations"].mean(0, keepdims=True)
@@ -546,6 +678,8 @@ class Manager:
             self.corrupt_w_noise()
         elif corr_type == 4:
             self.remove()
+        elif corr_type == 5:
+            self.new_scenario()
 
         replay_buffer = ReplayBuffer(state_dim=self.env.observation_space.shape[0],
                                      action_dim=self.env.action_space.shape[0], device=self.device)
@@ -555,9 +689,10 @@ class Manager:
         policy = TD3_BC_WM(state_dim=self.env.observation_space.shape[0], action_dim=self.env.action_space.shape[0],
                            max_action=max_action, world_model=self.model, aug_type=aug, writer=self.writer,
                            device=self.device)
-
-        for t in range(500000):
-            policy.train(replay_buffer, batch_size=256)
+        # hyperparameter = 1
+        for t in range(1000000):
+            # hyperparameter *= 0.999996
+            policy.train(replay_buffer, writer=self.writer, batch_size=256, hyperparameter=hyperparameter)
 
             # Evaluate episode
             if (t + 1) % 5000 == 0:
@@ -565,6 +700,71 @@ class Manager:
 
                 self.writer.add_scalar("D4RL_score",
                                        eval_policy(policy, self.env_name, 42, mean, std), t)
+
+    def new_scenario(self, env_name="halfcheetah-medium-expert-v2"):
+
+        env = gym.make(env_name)
+
+        new_dataset = self.create_new_scenario_dataset(env.get_dataset(), 10000, False)
+
+        mean_ = new_dataset["observations"].mean(0, keepdims=True)
+        std_ = new_dataset["observations"].std(0, keepdims=True) + 1e-9
+
+        new_act = torch.empty(0)
+        new_obs = torch.empty(0)
+        new_next = torch.empty(0)
+        new_reward = torch.empty(0)
+        new_terminal = torch.empty(0)
+        new_timeout = torch.empty(0)
+
+        for idx in np.array_split(np.arange(len(self.dataset_rl['observations'])), 100):
+            obs = torch.Tensor(self.dataset_rl['observations'][idx])
+            new_obs = torch.cat([new_obs, obs])
+
+            obs = (obs - mean_) / std_
+            act = torch.Tensor(self.dataset_rl['actions'][idx])
+            reward = torch.Tensor(self.dataset_rl['rewards'][idx])
+            terminal = torch.Tensor(self.dataset_rl['terminals'][idx])
+            timeout = torch.Tensor(self.dataset_rl['timeouts'][idx])
+
+            new_act = torch.cat([new_act, act])
+            new_reward = torch.cat([new_reward, reward])
+            new_terminal = torch.cat([new_terminal, terminal])
+            new_timeout = torch.cat([new_timeout, timeout])
+
+            obs = obs.to(self.device)
+            act = act.to(self.device)
+            obs = obs.to(torch.float32)
+            act = act.to(torch.float32)
+
+            next_1 = self.model(obs, act).cpu().detach()
+
+            new_next = torch.cat([new_next, next_1])
+
+        self.dataset_rl['observations'] = np.concatenate((self.dataset_rl['observations'], new_obs), axis=0)
+        self.dataset_rl['actions'] = np.concatenate((self.dataset_rl['actions'], new_act.numpy()), axis=0)
+        self.dataset_rl['rewards'] = np.concatenate((self.dataset_rl['rewards'], new_reward.numpy()), axis=0)
+        self.dataset_rl['terminals'] = np.concatenate((self.dataset_rl['terminals'], new_terminal.numpy()), axis=0)
+        self.dataset_rl['timeouts'] = np.concatenate((self.dataset_rl['timeouts'], new_timeout.numpy()), axis=0)
+        self.dataset_rl['next_observations'] = np.concatenate((self.dataset_rl['next_observations'], new_next.numpy()),
+                                                              axis=0)
+
+    def erase_variables(self):
+        self.dataset_rl['observations'][:, 2] = 0.
+        self.dataset_rl['observations'][:, 6] = 0.
+        self.dataset_rl['observations'][:, 7] = 0.
+        self.dataset_rl['observations'][:, 10] = 0.
+        self.dataset_rl['observations'][:, 16] = 0.
+        self.dataset_rl['observations'][:, 9] = 0.
+        self.dataset_rl['observations'][:, 14] = 0.
+
+        self.dataset_rl['next_observations'][:, 2] = 0.
+        self.dataset_rl['next_observations'][:, 6] = 0.
+        self.dataset_rl['next_observations'][:, 7] = 0.
+        self.dataset_rl['next_observations'][:, 10] = 0.
+        self.dataset_rl['next_observations'][:, 16] = 0.
+        self.dataset_rl['next_observations'][:, 9] = 0.
+        self.dataset_rl['next_observations'][:, 14] = 0.
 
     def augment_dataset(self, mean, std):
 
