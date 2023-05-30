@@ -29,7 +29,7 @@ if __name__ == "__main__":
     model_name = "end_to_end"
     test_name = "batch"
     manager = Manager(model_name=model_name, env_name=env_name, savepath=save_path, contrastive=False, perc=0,
-                      writer_name=writer_name, test_aug=False, entire_trajectory=True, dimension=None, all_dataset=True,
+                      writer_name=writer_name, test_aug=False, entire_trajectory=True, dimension=None, all_dataset=False,
                       test_name=test_name)
     # manager.train(200)
     manager.load(save_path)
@@ -38,7 +38,7 @@ if __name__ == "__main__":
     model_name = "end_to_end"
     test_name = "OEB"
     manager = Manager(model_name=model_name, env_name=env_name, savepath=save_path, contrastive=False, perc=0,
-                      writer_name=writer_name, test_aug=False, entire_trajectory=True, dimension=None, all_dataset=True,
+                      writer_name=writer_name, test_aug=False, entire_trajectory=True, dimension=None, all_dataset=False,
                       test_name=test_name)
     manager.load(save_path)
     manager.test_td3_bc(corr_type=1, aug=2)

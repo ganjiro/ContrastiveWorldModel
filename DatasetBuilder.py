@@ -40,21 +40,21 @@ class D4RLDataset(data.Dataset):
         self.acts = self.acts[new_index]
         self.reward = self.reward[new_index]
 
-        self.obs[:, 2] = 0.
-        self.obs[:, 6] = 0.
-        self.obs[:, 7] = 0.
-        self.obs[:, 10] = 0.
-        self.obs[:, 16] = 0.
-        self.obs[:, 9] = 0.
-        self.obs[:, 14] = 0.
-
-        self.next[:, 2] = 0.
-        self.next[:, 6] = 0.
-        self.next[:, 7] = 0.
-        self.next[:, 10] = 0.
-        self.next[:, 16] = 0.
-        self.next[:, 9] = 0.
-        self.next[:, 14] = 0.
+        # self.obs[:, 2] = 0.
+        # self.obs[:, 6] = 0.
+        # self.obs[:, 7] = 0.
+        # self.obs[:, 10] = 0.
+        # self.obs[:, 16] = 0.
+        # self.obs[:, 9] = 0.
+        # self.obs[:, 14] = 0.
+        #
+        # self.next[:, 2] = 0.
+        # self.next[:, 6] = 0.
+        # self.next[:, 7] = 0.
+        # self.next[:, 10] = 0.
+        # self.next[:, 16] = 0.
+        # self.next[:, 9] = 0.
+        # self.next[:, 14] = 0.
 
         self.obs = self.obs.to(torch.float32)
         self.next = self.next.to(torch.float32)

@@ -206,3 +206,20 @@ class Contrastive_world_model_end_to_end_reward(nn.Module):
         z = self.reparameterize(mu, log_var)
         z, reward = self.transitionZ(z, action)
         return self.decode(z), reward
+
+
+class ActionDecoder(nn.Module):
+    def __init__(self, state_dim, action_dim, hidden_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(state_dim * 2, int(hidden_dim / 2))
+        self.fc2 = nn.Linear(int(hidden_dim / 2), hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, int(hidden_dim / 2))
+        self.fc4 = nn.Linear(int(hidden_dim / 2), action_dim)
+
+    def forward(self, x, delta_x):
+        x = torch.cat([x, delta_x], dim=1)
+        out = F.relu(self.fc1(x))
+        out = F.relu(self.fc2(out))
+        out = F.relu(self.fc3(out))
+        out = self.fc4(out)
+        return out

@@ -8,6 +8,7 @@ import torch
 import copy
 
 from matplotlib import pyplot as plt
+
 from scipy.special.cython_special import hyp0f1
 from torch import nn
 import torch.nn.functional as F
@@ -76,7 +77,7 @@ class TD3_BC_WM(object):
             world_model,
             aug_type=0,
             # 0 no aug, 1 perc batch size, 2 over estimation bias, 3 noise, 4 S4rl,  5 batch REW # 6 S4RL Rew
-            # 7 Clipping # 8 mia idea # 9 azione
+            # 7 Clipping # 8 mia idea # 9 azione # 10 Creo L'azione
             discount=0.99,
             tau=0.005,
             policy_noise=0.2,
@@ -85,6 +86,7 @@ class TD3_BC_WM(object):
             alpha=2.5,
             device='cpu',
             writer=None,
+            action_model=None,
             eps=1,  # clipping eps
     ):
 
@@ -110,6 +112,7 @@ class TD3_BC_WM(object):
 
         self.aug_type = aug_type
         self.world_model = world_model
+        self.action_model = action_model
 
         if self.aug_type == 8:
             self.replay_memory = ReplayMemory(20000)
@@ -192,6 +195,17 @@ class TD3_BC_WM(object):
                 next_state_aug = self.world_model(state[to_aug], action_aug)
 
             next_state[to_aug] = next_state_aug
+            action[to_aug] = action_aug
+
+        if self.aug_type == 10:
+            to_aug = np.random.choice(len(next_state),
+                                      int(len(next_state) * hyperparameter), replace=False)
+
+            with torch.no_grad():
+                next_state_aug = self.world_model(state, action)
+                action_aug = self.action_model(state, next_state_aug - state)
+
+            next_state[to_aug] = next_state_aug[to_aug]
             action[to_aug] = action_aug
 
         with torch.no_grad():

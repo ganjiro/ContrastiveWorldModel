@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from DatasetBuilder import D4RLDataset  # D4RLDatasetTest
 from Models import Contrastive_world_model_end_to_end, VAE, \
-    ContrastiveHead, Contrastive_world_model_end_to_end_reward
+    ContrastiveHead, Contrastive_world_model_end_to_end_reward, ActionDecoder
 
 from TD3_BC_WM import TD3_BC_WM, ReplayBuffer, eval_policy
 from test_TD3 import TD3_BC_TEST
@@ -32,14 +32,18 @@ from datetime import datetime
 class Manager:
 
     def __init__(self, model_name, env_name, perc=0.3, savepath=None, contrastive=True, writer_name="Manager",
-                 test_aug=False, dimension=None, entire_trajectory=True, test_name="", std_reward=False, all_dataset=False):
+                 test_aug=False, dimension=None, entire_trajectory=True, test_name="", std_reward=False,
+                 all_dataset=False,
+                 action=False):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.savepath = savepath
         self.model_name = model_name
         self.env_name = env_name
         self.contrastive = contrastive
         self.test_aug = test_aug
+        self.action = action
         self.entire_trajectory = entire_trajectory
+        self.model_action = None
 
         self.env = gym.make(env_name)
 
@@ -81,7 +85,7 @@ class Manager:
                                                             z_dim=12, action_dim=self.env.action_space.shape[0],
                                                             hidden_dim_head=300).to(self.device)
 
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-5)
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=6e-5)
 
             self.train_fn = self._train_end_to_end_new
 
@@ -90,6 +94,13 @@ class Manager:
                     self.device)
                 self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-4)
                 self.loaded_vae = False
+
+            if self.action:
+                self.model_action = ActionDecoder(state_dim=self.env.observation_space.shape[0], hidden_dim=500,
+                                                  action_dim=self.env.action_space.shape[0]).to(self.device)
+                self.optimizer_action = torch.optim.Adam(self.model_action.parameters(), lr=1e-4)
+                self.loaded_act = False
+
 
         elif model_name == "reward":
             self.model = Contrastive_world_model_end_to_end_reward(input_dim=self.env.observation_space.shape[0],
@@ -132,6 +143,11 @@ class Manager:
                 self.model_vae = torch.load(os.path.join(load_path, "VAE.pt"), map_location='cuda:0').to(self.device)
 
                 self.model_vae.eval()
+            if self.action:
+                self.loaded_act = True
+                self.model_action = torch.load(os.path.join(load_path, "action.pt"), map_location='cuda:0').to(
+                    self.device)
+                self.model_action.eval()
 
         elif self.model_name == "splitted":
             self.loaded_vae = True
@@ -140,16 +156,18 @@ class Manager:
             self.model_contr = torch.load(
                 os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
 
-    def load_vae(self, load_path):
-        self.loaded_vae = True
-        self.model_vae = torch.load(os.path.join(load_path, "VAE.pt")).to(self.device)
-        self.model_vae.eval()
+
 
     def train(self, epochs):
         if (self.model_name == "splitted" and not self.loaded_vae) or (self.contrastive and not self.loaded_vae):
             self.model_vae.train()
             self._train_vae(200)
             self.model_vae.eval()
+
+        if self.action:
+            self.model_action.train()
+            self._train_action(200)
+            self.model_action.eval()
 
         for epoch in range(epochs):
             loss = self.train_fn(epoch)
@@ -215,6 +233,13 @@ class Manager:
                      range(1000)]
         else:
             index = np.random.permutation(int(len(dataset['next_observations'])))
+
+        # sus = copy.deepcopy(dataset)
+        # noise = np.random.normal(0, 0.01, dataset['next_observations'].shape)
+        # noisy = dataset['next_observations'] + noise
+        # dataset['next_observations'] = noisy
+        # tmp = np.arange(len(dataset['next_observations']))
+        # dataset['observations'][tmp[tmp % 1000 != 999] + 1] = noisy[tmp % 1000 != 999]
 
         dataset_test = copy.deepcopy(dataset)
 
@@ -554,8 +579,8 @@ class Manager:
 
     def _train_vae(self, epochs):
 
-        self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=400, z_dim=12).to(self.device)
-        self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-4)
+        # self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=400, z_dim=12).to(self.device)
+        # self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-4)
 
         for epoch in range(epochs):
             train_loss = 0
@@ -585,6 +610,31 @@ class Manager:
 
         if self.savepath:
             torch.save(self.model_vae, os.path.join(self.savepath, "VAE.pt"))
+
+    def _train_action(self, epochs):
+
+        for epoch in range(epochs):
+            train_loss = 0
+
+            for batch_idx, (data, action, next, _) in enumerate(self.loader):
+                self.optimizer_action.zero_grad()
+                data = data.to(self.device)
+                next = next.to(self.device)
+                action = action.to(self.device)
+                recon_action = self.model_action(data, next - data)
+                loss = F.mse_loss(recon_action, action, reduction='mean')
+
+                loss.backward()
+                train_loss += loss.item()
+
+                self.optimizer_action.step()
+
+            self.writer.add_scalar("Action/train_loss", train_loss / len(self.loader), epoch)
+
+            if epoch % 20 == 0: self.test_action(epoch)
+
+        if self.savepath:
+            torch.save(self.model_action, os.path.join(self.savepath, "action.pt"))
 
     def loss_function_vae(self, recon_x, x, mu, log_var, itr):
 
@@ -622,6 +672,23 @@ class Manager:
 
         self.writer.add_scalar("Test_vae/MSE_Recon", dist_rec / len(self.test_loader), epoch)
         print('Recon Dist: {:.4f}'.format(dist_rec / len(self.test_loader)))
+
+    def test_action(self, epoch=0):
+
+        dist_rec = 0
+
+        for batch_idx, (data, act, next, reward) in enumerate(self.test_loader):
+            data = data.to(self.device)
+            next = next.to(self.device)
+            act = act.to(self.device)
+
+            with torch.no_grad():
+                recon_action = self.model_action(data, next - data)
+
+            dist_rec += F.mse_loss(recon_action, act)
+
+        self.writer.add_scalar("Action/MSE_test", dist_rec / len(self.test_loader), epoch)
+        print('Action Dist: {:.4f}'.format(dist_rec / len(self.test_loader)))
 
     def test_world_model(self, epoch=0):
         dist_rec = 0
@@ -688,9 +755,9 @@ class Manager:
 
         policy = TD3_BC_WM(state_dim=self.env.observation_space.shape[0], action_dim=self.env.action_space.shape[0],
                            max_action=max_action, world_model=self.model, aug_type=aug, writer=self.writer,
-                           device=self.device)
+                           device=self.device, action_model=self.model_action)
         # hyperparameter = 1
-        for t in range(1000000):
+        for t in range(500000):
             # hyperparameter *= 0.999996
             policy.train(replay_buffer, writer=self.writer, batch_size=256, hyperparameter=hyperparameter)
 
