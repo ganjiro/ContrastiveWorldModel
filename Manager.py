@@ -11,10 +11,9 @@ from Models import Contrastive_world_model_end_to_end, VAE, \
     ContrastiveHead, Contrastive_world_model_end_to_end_reward, ActionDecoder
 
 from TD3_BC_WM import TD3_BC_WM, ReplayBuffer, eval_policy
-from test_TD3 import TD3_BC_TEST
 
 os.environ["D4RL_SUPPRESS_IMPORT_ERROR"] = "1"
-os.environ["LD_LIBRARY_PATH"] = ":/home/gmacaluso/.mujoco/mujoco210/bin:/home/gmacaluso/miniconda3/lib"
+os.environ["LD_LIBRARY_PATH"] = ":/home/ganjiro/.mujoco/mujoco210/bin:/usr/lib/nvidia"
 
 import d4rl
 
@@ -85,7 +84,7 @@ class Manager:
                                                             z_dim=12, action_dim=self.env.action_space.shape[0],
                                                             hidden_dim_head=300).to(self.device)
 
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=6e-5)
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-5)
 
             self.train_fn = self._train_end_to_end_new
 
@@ -98,7 +97,7 @@ class Manager:
             if self.action:
                 self.model_action = ActionDecoder(state_dim=self.env.observation_space.shape[0], hidden_dim=500,
                                                   action_dim=self.env.action_space.shape[0]).to(self.device)
-                self.optimizer_action = torch.optim.Adam(self.model_action.parameters(), lr=1e-4)
+                self.optimizer_action = torch.optim.Adam(self.model_action.parameters(), lr=1e-5)
                 self.loaded_act = False
 
 
@@ -155,8 +154,6 @@ class Manager:
             self.model_vae.eval()
             self.model_contr = torch.load(
                 os.path.join(load_path, self.model_name + ('' if self.contrastive else '_no_contrastive') + ".pt"))
-
-
 
     def train(self, epochs):
         if (self.model_name == "splitted" and not self.loaded_vae) or (self.contrastive and not self.loaded_vae):
@@ -226,7 +223,7 @@ class Manager:
             dataset['next_observations'] = np.append(dataset['observations'][1:],
                                                      np.expand_dims(dataset['observations'][1], axis=0), axis=0)
 
-        np.random.seed(42)
+        # np.random.seed(42)
 
         if self.entire_trajectory:
             index = [i * 1000 + j for i in np.random.permutation(int(len(dataset['next_observations']) / 1000)) for j in
@@ -727,8 +724,11 @@ class Manager:
         print('Trans Dist: {:.4f}'.format(dist_trans / len(self.test_loader)))
 
     def test_td3_bc(self, corr_type=0, aug=0, eps=0,
-                    hyperparameter=None):  # corr_type 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove;
+                    hyperparameter=None,
+                    iterations=500000):  # corr_type 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove;
         # Aug 0 No aug; 1 Perc Batch; 2 Over esitmation # 3 noise # 4 S4rl # 5 batch REW
+        run = []
+
         max_action = float(self.env.action_space.high[0])
 
         mean_ = self.dataset_rl["observations"].mean(0, keepdims=True)
@@ -757,16 +757,19 @@ class Manager:
                            max_action=max_action, world_model=self.model, aug_type=aug, writer=self.writer,
                            device=self.device, action_model=self.model_action)
         # hyperparameter = 1
-        for t in range(500000):
+        for t in range(iterations):
             # hyperparameter *= 0.999996
             policy.train(replay_buffer, writer=self.writer, batch_size=256, hyperparameter=hyperparameter)
 
             # Evaluate episode
             if (t + 1) % 5000 == 0:
                 print(f"Time steps: {t + 1}")
-
+                score = eval_policy(policy, self.env_name, 42, mean, std)
+                run.append(score)
                 self.writer.add_scalar("D4RL_score",
-                                       eval_policy(policy, self.env_name, 42, mean, std), t)
+                                       score, t)
+
+        return run
 
     def new_scenario(self, env_name="halfcheetah-medium-expert-v2"):
 

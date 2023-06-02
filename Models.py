@@ -58,7 +58,7 @@ class Contrastive_world_model_end_to_end(nn.Module):
         out = F.relu(self.fc2_contr(out))
         out = F.relu(self.fc3_contr(out))
         out = self.fc4_contr(out)
-        return out + z
+        return out
 
     def forward(self, x, action):
         mu, log_var = self.encode(x)
