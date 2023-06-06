@@ -32,7 +32,7 @@ class Manager:
 
     def __init__(self, model_name, env_name, perc=0.3, savepath=None, contrastive=True, writer_name="Manager",
                  test_aug=False, dimension=None, entire_trajectory=True, test_name="", std_reward=False,
-                 all_dataset=False,
+                 equal_size=False,
                  action=False):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.savepath = savepath
@@ -49,9 +49,9 @@ class Manager:
         if not os.path.exists(savepath):
             os.mkdir(savepath)
 
-        if all_dataset:
-            self.dataset_contr, self.dataset_rl, self.dataset_test, dimension = self.create_complete_dataset(
-            )
+        if equal_size:
+            self.dataset_contr, self.dataset_rl, self.dataset_test, self.corrupted_index = self.create_dataset_equal_size(
+                perc=perc, envname=self.env_name[:self.env_name.find("-")], entire_trajectory=entire_trajectory,dimension=dimension)
         elif self.entire_trajectory and not dimension:
             self.dataset_contr, self.dataset_rl, self.dataset_test, dimension = self.create_full_dataset(
                 self.env.get_dataset())
@@ -244,7 +244,6 @@ class Manager:
         index_wl_rl = index[:dimension]
 
         dataset['actions'] = dataset['actions'][index_wl_rl]
-        # dataset['infos/action_log_probs'] = dataset['infos/action_log_probs'][index_wl_rl]
         dataset['next_observations'] = dataset['next_observations'][index_wl_rl]
         dataset['observations'] = dataset['observations'][index_wl_rl]
         dataset['rewards'] = dataset['rewards'][index_wl_rl]
@@ -252,7 +251,6 @@ class Manager:
         dataset['timeouts'] = dataset['timeouts'][index_wl_rl]
 
         dataset_test['actions'] = dataset_test['actions'][index_test]
-        # dataset_test['infos/action_log_probs'] = dataset_test['infos/action_log_probs'][index_test]
         dataset_test['next_observations'] = dataset_test['next_observations'][index_test]
         dataset_test['observations'] = dataset_test['observations'][index_test]
         dataset_test['rewards'] = dataset_test['rewards'][index_test]
@@ -265,7 +263,6 @@ class Manager:
         dataset_contr = copy.deepcopy(dataset)
 
         dataset_contr['actions'] = np.delete(dataset_contr['actions'], to_corrupt, axis=0)
-        # dataset_contr['infos/action_log_probs'] = np.delete(dataset_contr['infos/action_log_probs'], to_corrupt, axis=0)
         dataset_contr['next_observations'] = np.delete(dataset_contr['next_observations'], to_corrupt, axis=0)
         dataset_contr['observations'] = np.delete(dataset_contr['observations'], to_corrupt, axis=0)
         dataset_contr['rewards'] = np.delete(dataset_contr['rewards'], to_corrupt, axis=0)
@@ -373,6 +370,95 @@ class Manager:
         dataset_test['timeouts'] = dataset_test['timeouts'][-20000:]
 
         return dataset_contr, dataset, dataset_test, len(dataset['actions'])
+
+    def create_dataset_equal_size(self, envname, entire_trajectory, dimension, perc):
+        env = gym.make(envname + "-expert-v2")
+        dataset_m = env.get_dataset()
+        env = gym.make(envname + "-medium-v2")
+        dataset_e = env.get_dataset()
+
+        dataset_test = {}
+
+        if entire_trajectory:
+            index = [i * 1000 + j for i in np.random.permutation(int(len(dataset_m['next_observations']) / 1000)) for j
+                     in
+                     range(1000)]
+        else:
+            index = np.random.permutation(int(len(dataset_m['next_observations'])))
+
+        index = index[:int(dimension / 2)]
+        index_test = index[-10000:]
+
+        dataset_test['actions'] = dataset_m['actions'][index_test]
+        dataset_test['next_observations'] = dataset_m['next_observations'][index_test]
+        dataset_test['observations'] = dataset_m['observations'][index_test]
+        dataset_test['rewards'] = dataset_m['rewards'][index_test]
+        dataset_test['terminals'] = dataset_m['terminals'][index_test]
+        dataset_test['timeouts'] = dataset_m['timeouts'][index_test]
+
+        dataset_m['actions'] = dataset_m['actions'][index]
+        dataset_m['observations'] = dataset_m['observations'][index]
+        dataset_m['next_observations'] = dataset_m['next_observations'][index]
+        dataset_m['rewards'] = dataset_m['rewards'][index]
+        dataset_m['terminals'] = dataset_m['terminals'][index]
+        dataset_m['timeouts'] = dataset_m['timeouts'][index]
+
+        if entire_trajectory:
+            index = [i * 1000 + j for i in np.random.permutation(int(len(dataset_e['next_observations']) / 1000)) for j
+                     in
+                     range(1000)]
+        else:
+            index = np.random.permutation(int(len(dataset_e['next_observations'])))
+
+        index = index[:int(dimension / 2)]
+        index_test = index[-10000:]
+
+        dataset_test['actions'] = np.concatenate((dataset_test['actions'], dataset_e['actions'][index_test]))
+        dataset_test['observations'] = np.concatenate((dataset_test['observations'], dataset_e['observations'][index_test]))
+        dataset_test['next_observations'] = np.concatenate((dataset_test['next_observations'], dataset_e['next_observations'][index_test]))
+        dataset_test['rewards'] = np.concatenate((dataset_test['rewards'], dataset_e['rewards'][index_test]))
+        dataset_test['terminals'] = np.concatenate((dataset_test['terminals'], dataset_e['terminals'][index_test]))
+        dataset_test['timeouts'] = np.concatenate((dataset_test['timeouts'], dataset_e['timeouts'][index_test]))
+
+        dataset_e['actions'] = dataset_e['actions'][index]
+        dataset_e['observations'] = dataset_e['observations'][index]
+        dataset_e['next_observations'] = dataset_e['next_observations'][index]
+        dataset_e['rewards'] = dataset_e['rewards'][index]
+        dataset_e['terminals'] = dataset_e['terminals'][index]
+        dataset_e['timeouts'] = dataset_e['timeouts'][index]
+
+        dataset = {}
+
+        dataset['actions'] = np.concatenate((dataset_m['actions'], dataset_e['actions']))
+        dataset['observations'] = np.concatenate((dataset_m['observations'], dataset_e['observations']))
+        dataset['next_observations'] = np.concatenate((dataset_m['next_observations'], dataset_e['next_observations']))
+        dataset['rewards'] = np.concatenate((dataset_m['rewards'], dataset_e['rewards']))
+        dataset['terminals'] = np.concatenate((dataset_m['terminals'], dataset_e['terminals']))
+        dataset['timeouts'] = np.concatenate((dataset_m['timeouts'], dataset_e['timeouts']))
+
+        to_corrupt = np.random.choice(len(dataset['next_observations']),
+                                      int(len(dataset['next_observations']) * perc), replace=False)
+
+        dataset_contr = copy.deepcopy(dataset)
+
+        dataset_contr['actions'] = np.delete(dataset_contr['actions'], to_corrupt, axis=0)
+        dataset_contr['next_observations'] = np.delete(dataset_contr['next_observations'], to_corrupt, axis=0)
+        dataset_contr['observations'] = np.delete(dataset_contr['observations'], to_corrupt, axis=0)
+        dataset_contr['rewards'] = np.delete(dataset_contr['rewards'], to_corrupt, axis=0)
+        dataset_contr['terminals'] = np.delete(dataset_contr['terminals'], to_corrupt, axis=0)
+        dataset_contr['timeouts'] = np.delete(dataset_contr['timeouts'], to_corrupt, axis=0)
+
+        index = np.concatenate(
+            (np.where(dataset_contr['timeouts'] == True), np.where(dataset_contr['terminals'] == True)), axis=1)
+
+        dataset_contr['actions'] = np.delete(dataset_contr['actions'], index, axis=0)
+        dataset_contr['observations'] = np.delete(dataset_contr['observations'], index, axis=0)
+        dataset_contr['next_observations'] = np.delete(dataset_contr['next_observations'], index, axis=0)
+        dataset_contr['rewards'] = np.delete(dataset_contr['rewards'], index, axis=0)
+        dataset_contr['terminals'] = np.delete(dataset_contr['terminals'], index, axis=0)
+        dataset_contr['timeouts'] = np.delete(dataset_contr['timeouts'], index, axis=0)
+
+        return dataset_contr, dataset, dataset_test, to_corrupt
 
     def close_writer(self):
         self.writer.flush()
@@ -644,7 +730,6 @@ class Manager:
         beta = min((itr_ / (len(self.loader) * 25)), 1)
 
         self.writer.add_scalar("itr", itr_, itr)
-
         self.writer.add_scalar("beta", beta, itr)
 
         kld_weight = 1 / len(self.loader)
@@ -700,7 +785,6 @@ class Manager:
             with torch.no_grad():
                 if self.model_name == "end_to_end":
                     recon_batch, _, _, _ = self.model.reconstruct(data)
-
                     trans_batch = self.model(data, act)
                 elif self.model_name == "reward":
                     recon_batch, _, _, _ = self.model.reconstruct(data)

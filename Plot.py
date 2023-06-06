@@ -17,8 +17,9 @@ from numpy import load
 # plt.fill_between(x, (mean-variance), (mean+variance), color='b', alpha=.1)
 # plt.savefig(os.path.join(file_path,os.path.splitext(file_name)[0]+".png"))
 
-file_path = "Writers/halfcheetah_E_test_action_recn"
-file_name = "Vanilla.npy"
+file_path = "Writers/hopper_Fill"
+
+file_name = "remove.npy"
 
 data = load(os.path.join(file_path, file_name), allow_pickle=True)
 
@@ -26,30 +27,33 @@ mean = data.mean(axis=0)
 variance = data.std(axis=0)
 x = np.arange(len(mean)) * 5000
 
-plt.plot(x, mean)
+plt.plot(x, mean, color='b', label="Remove")
 plt.fill_between(x, (mean - variance), (mean + variance), color='b', alpha=.1)
 
-file_name = "batch+action.npy"
+file_name = "fillGap.npy"
 
 data = load(os.path.join(file_path, file_name), allow_pickle=True)
+mask = np.ones(len(data), dtype=bool)
+mask[1] = 0
+data = data[mask]
 
 mean = data.mean(axis=0)
 variance = data.std(axis=0)
 x = np.arange(len(mean)) * 5000
 
-plt.plot(x, mean, color='g',)
+plt.plot(x, mean, color='g', label="Filled w/ WM")
 plt.fill_between(x, (mean - variance), (mean + variance), color='g', alpha=.1)
-
-
-file_name = "oeb.npy"
-
-data = load(os.path.join(file_path, file_name), allow_pickle=True)
-
-mean = data.mean(axis=0)
-variance = data.std(axis=0)
-x = np.arange(len(mean)) * 5000
-
-plt.plot(x, mean, color='y',)
-plt.fill_between(x, (mean - variance), (mean + variance), color='y', alpha=.1)
+plt.legend(loc="upper left")
+#
+# file_name = "oeb.npy"
+#
+# data = load(os.path.join(file_path, file_name), allow_pickle=True)
+#
+# mean = data.mean(axis=0)
+# variance = data.std(axis=0)
+# x = np.arange(len(mean)) * 5000
+#
+# plt.plot(x, mean, color='y',)
+# plt.fill_between(x, (mean - variance), (mean + variance), color='y', alpha=.1)
 
 plt.savefig(os.path.join(file_path, "merge.png"))
