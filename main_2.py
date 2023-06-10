@@ -43,6 +43,7 @@ if __name__ == "__main__":
     for i in range(repeats):
         manager = Manager(model_name=model_name, env_name=env_name, savepath=save_path, contrastive=True, perc=0.7,
                           writer_name=writer_name, test_aug=False, entire_trajectory=True, dimension=50000,
+                          equal_size=True,
                           test_name=test_name)
         runs.append(manager.test_td3_bc(corr_type=4, iterations=500000))
         np.save(os.path.join(writer_name, test_name + '.npy'), np.array(runs))
