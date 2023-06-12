@@ -31,44 +31,43 @@ from datetime import datetime
 class Manager:
 
     def __init__(self, model_name, env_name, perc=0.3, savepath=None, contrastive=True, writer_name="Manager",
-                 test_aug=False, dimension=None, entire_trajectory=True, test_name="", std_reward=False,
-                 equal_size=False,
+                 dimension=None, entire_trajectory=True, test_name="", std_reward=False,
+                 equal_size=False, inject_noise=False,
                  action=False):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.savepath = savepath
         self.model_name = model_name
         self.env_name = env_name
         self.contrastive = contrastive
-        self.test_aug = test_aug
+        # self.test_aug = test_aug
         self.action = action
         self.entire_trajectory = entire_trajectory
         self.model_action = None
 
         self.env = gym.make(env_name)
 
-        if not os.path.exists(savepath):
+        if self.savepath and not os.path.exists(savepath):
             os.mkdir(savepath)
 
         if equal_size:
             self.dataset_contr, self.dataset_rl, self.dataset_test, self.corrupted_index = self.create_dataset_equal_size(
-                perc=perc, envname=self.env_name[:self.env_name.find("-")], entire_trajectory=entire_trajectory,dimension=dimension)
+                perc=perc, envname=self.env_name[:self.env_name.find("-")], entire_trajectory=entire_trajectory,dimension=dimension, inject_noise=inject_noise)
         elif self.entire_trajectory and not dimension:
             self.dataset_contr, self.dataset_rl, self.dataset_test, dimension = self.create_full_dataset(
-                self.env.get_dataset())
-        elif self.test_aug:
-            self.dataset_contr, self.dataset_rl, self.dataset_test = self.create_dataset_test_aug(
-                self.env.get_dataset(), dimension)
+                self.env.get_dataset(), inject_noise)
+        # elif self.test_aug:
+        #     self.dataset_contr, self.dataset_rl, self.dataset_test = self.create_dataset_test_aug(
+        #         self.env.get_dataset(), dimension)
         else:
             self.dataset_contr, self.dataset_rl, self.dataset_test, self.corrupted_index = self.create_datasets(
-                self.env.get_dataset(), dimension, perc)
+                self.env.get_dataset(), dimension, perc, inject_noise)
 
         self.loader = DataLoader(D4RLDataset(self.dataset_contr, std_reward), batch_size=4096, shuffle=True,
                                  num_workers=8)
         self.test_loader = DataLoader(D4RLDataset(self.dataset_test, std_reward), batch_size=500, shuffle=True,
                                       num_workers=8)
 
-        self.writer_name = test_name + '_' + self.model_name + \
-                           ('_testaug' if self.test_aug else '') + (
+        self.writer_name = test_name + '_' + self.model_name + (
                                '_traj' if self.entire_trajectory else '_random') + '_' + str(dimension) + (
                                '' if contrastive else '_no_contrastive') + '_' + env_name + (
                                '' if perc == 0 else str(perc))
@@ -182,7 +181,7 @@ class Manager:
         return
 
     def create_dataset_test_aug(self, dataset, n_transitions):
-        np.random.seed(42)
+        # np.random.seed(42)
 
         if self.entire_trajectory:
             index = [i * 1000 + j for i in np.random.permutation(int(len(dataset['next_observations']) / 1000)) for j in
@@ -215,7 +214,7 @@ class Manager:
 
         return dataset_wl_rl, dataset, dataset_test
 
-    def create_datasets(self, dataset, dimension, perc):  # todo forse queste deep copy sono useless
+    def create_datasets(self, dataset, dimension, perc,inject_noise ):  # todo forse queste deep copy sono useless
 
         try:
             dataset['next_observations']
@@ -224,6 +223,9 @@ class Manager:
                                                      np.expand_dims(dataset['observations'][1], axis=0), axis=0)
 
         # np.random.seed(42)
+
+        if inject_noise:
+            self.inject_noise_dataset(dataset)
 
         if self.entire_trajectory:
             index = [i * 1000 + j for i in np.random.permutation(int(len(dataset['next_observations']) / 1000)) for j in
@@ -289,7 +291,7 @@ class Manager:
             dataset['next_observations'] = np.append(dataset['observations'][1:],
                                                      np.expand_dims(dataset['observations'][1], axis=0), axis=0)
 
-        np.random.seed(42)
+        # np.random.seed(42)
 
         if entire_trajectory:
             index = [i * 1000 + j for i in np.random.permutation(int(len(dataset['next_observations']) / 1000)) for j in
@@ -309,13 +311,16 @@ class Manager:
 
         return dataset
 
-    def create_full_dataset(self, dataset):
+    def create_full_dataset(self, dataset, inject_noise):
 
         try:
             dataset['next_observations']
         except:
             dataset['next_observations'] = np.append(dataset['observations'][1:],
                                                      np.expand_dims(dataset['observations'][1], axis=0), axis=0)
+
+        if inject_noise:
+            self.inject_noise_dataset(dataset)
 
         dataset_test = copy.deepcopy(dataset)
         dataset_contr = copy.deepcopy(dataset)
@@ -371,11 +376,22 @@ class Manager:
 
         return dataset_contr, dataset, dataset_test, len(dataset['actions'])
 
-    def create_dataset_equal_size(self, envname, entire_trajectory, dimension, perc):
+    def inject_noise_dataset(self, dataset):
+        noise = np.random.normal(0, 0.5, dataset['next_observations'].shape)
+        noisy = dataset['next_observations'] + noise
+        dataset['next_observations'] = noisy
+        index = np.arange(dataset['next_observations'].shape[0])
+        dataset['observations'][index[index % 1000 != 999] + 1] = noisy[index % 1000 != 999]
+
+    def create_dataset_equal_size(self, envname, entire_trajectory, dimension, perc, inject_noise):
         env = gym.make(envname + "-expert-v2")
         dataset_m = env.get_dataset()
         env = gym.make(envname + "-medium-v2")
         dataset_e = env.get_dataset()
+
+        if inject_noise:
+            self.inject_noise_dataset(dataset_m)
+            self.inject_noise_dataset(dataset_e)
 
         dataset_test = {}
 
@@ -972,7 +988,7 @@ class Manager:
     def corrupt_w_worldmodel(self, mean, std):
 
         obs = torch.Tensor(self.dataset_rl['observations'][self.corrupted_index])
-        obs -= mean  # obs = (obs - mean) / std
+        obs = (obs - mean) / std
         obs = obs.to(self.device)
         act = torch.Tensor(self.dataset_rl['actions'][self.corrupted_index]).to(self.device)
 
@@ -1007,14 +1023,13 @@ class Manager:
         if self.model_name == "reward":
             self.dataset_rl['rewards'][self.corrupted_index] = reward
 
-        self.dataset_rl['observations'][self.corrupted_index[self.corrupted_index % 1000 != 999] + 1] = prediction[
-            self.corrupted_index % 1000 != 999]
+        if self.entire_trajectory:
+            self.dataset_rl['observations'][self.corrupted_index[self.corrupted_index % 1000 != 999] + 1] = prediction[
+                self.corrupted_index % 1000 != 999]
 
     def remove(self):
 
         self.dataset_rl['actions'] = np.delete(self.dataset_rl['actions'], self.corrupted_index, axis=0)
-        self.dataset_rl['infos/action_log_probs'] = np.delete(self.dataset_rl['infos/action_log_probs'],
-                                                              self.corrupted_index, axis=0)
         self.dataset_rl['next_observations'] = np.delete(self.dataset_rl['next_observations'], self.corrupted_index,
                                                          axis=0)
         self.dataset_rl['observations'] = np.delete(self.dataset_rl['observations'], self.corrupted_index, axis=0)
@@ -1170,10 +1185,10 @@ class Manager:
         std = torch.FloatTensor(tmp_dataset.std).to(self.device)
 
         obs_itr -= mean
-        # obs_itr /= std
+        obs_itr /= std
 
         next_itr -= mean
-        # next_itr /= var
+        next_itr /= std
 
         for i in range(10):
             with torch.no_grad():
@@ -1193,6 +1208,6 @@ class Manager:
             next_itr = torch.Tensor(self.dataset_test['next_observations'][starting_point + i + 1]).to(self.device)
 
             next_itr -= mean
-            # next_itr /= std
+            next_itr /= std
 
         print(mse_depth)
