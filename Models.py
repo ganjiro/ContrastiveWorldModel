@@ -66,6 +66,13 @@ class Contrastive_world_model_end_to_end(nn.Module):
         z = self.transitionZ(z, action)
         return self.decode(z)
 
+    def forward_and_out(self, x, action):
+        mu, log_var = self.encode(x)
+        z_t = self.reparameterize(mu, log_var)
+        z_1 = self.transitionZ(z_t, action)
+        return self.decode(z_1), self.decode(z_t)
+
+
 
 class VAE(nn.Module):
     def __init__(self, input_dim, hidden_dim, z_dim):

@@ -77,7 +77,7 @@ class TD3_BC_WM(object):
             world_model,
             aug_type=0,
             # 0 no aug, 1 perc batch size, 2 over estimation bias, 3 noise, 4 S4rl,  5 batch REW # 6 S4RL Rew
-            # 7 Clipping # 8 mia idea # 9 azione # 10 Creo L'azione
+            # 7 Clipping # 8 mia idea # 9 azione # 10 Creo L'azione #11 batch + state #12 batch con s+eps
             discount=0.99,
             tau=0.005,
             policy_noise=0.2,
@@ -207,6 +207,25 @@ class TD3_BC_WM(object):
 
             next_state[to_aug] = next_state_aug[to_aug]
             action[to_aug] = action_aug
+
+        if self.aug_type == 11 and hyperparameter > 0.001:
+            to_aug = np.random.choice(len(next_state),
+                                      int(len(next_state) * hyperparameter), replace=False)
+
+            with torch.no_grad():
+                next_state_aug, state_aug = self.world_model.forward_and_out(state, action)
+
+            next_state[to_aug] = next_state_aug[to_aug]
+            state[to_aug] = state_aug[to_aug]
+
+        if self.aug_type == 12 and hyperparameter > 0.001:
+            to_aug = np.random.choice(len(next_state),
+                                      int(len(next_state) * hyperparameter), replace=False)
+            state_noisy = state + torch.randn_like(state[to_aug]) / 10
+            with torch.no_grad():
+                next_state_aug = self.world_model(state_noisy, action)
+
+            next_state[to_aug] = next_state_aug[to_aug]
 
         with torch.no_grad():
             # Select action according to policy and add clipped noise
