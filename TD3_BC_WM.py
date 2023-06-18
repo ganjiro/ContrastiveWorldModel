@@ -221,7 +221,7 @@ class TD3_BC_WM(object):
         if self.aug_type == 12 and hyperparameter > 0.001:
             to_aug = np.random.choice(len(next_state),
                                       int(len(next_state) * hyperparameter), replace=False)
-            state_noisy = state + torch.randn_like(state[to_aug]) / 10
+            state_noisy = state + torch.randn_like(state) / 10
             with torch.no_grad():
                 next_state_aug = self.world_model(state_noisy, action)
 
@@ -261,15 +261,15 @@ class TD3_BC_WM(object):
 
                 target_Q1_aug_0, target_Q2_aug_0 = self.critic_target(next_state_aug_0, next_action)
                 target_Q1_aug_1, target_Q2_aug_1 = self.critic_target(next_state_aug_1, next_action)
-
-                target_Q1 = target_Q1 * hyperparameter
-                target_Q2 = target_Q2 * hyperparameter
-
-                target_Q1_aug_0 = target_Q1_aug_0 * (1 - (hyperparameter / 2))
-                target_Q2_aug_0 = target_Q2_aug_0 * (1 - (hyperparameter / 2))
-
-                target_Q1_aug_1 = target_Q1_aug_1 * (1 - (hyperparameter / 2))
-                target_Q2_aug_1 = target_Q2_aug_1 * (1 - (hyperparameter / 2))
+                #
+                # target_Q1 = target_Q1 * hyperparameter
+                # target_Q2 = target_Q2 * hyperparameter
+                #
+                # target_Q1_aug_0 = target_Q1_aug_0 * (1 - (hyperparameter / 2))
+                # target_Q2_aug_0 = target_Q2_aug_0 * (1 - (hyperparameter / 2))
+                #
+                # target_Q1_aug_1 = target_Q1_aug_1 * (1 - (hyperparameter / 2))
+                # target_Q2_aug_1 = target_Q2_aug_1 * (1 - (hyperparameter / 2))
 
                 target_Q1 = torch.mean(torch.cat([target_Q1, target_Q1_aug_0, target_Q1_aug_1]))
                 target_Q2 = torch.mean(torch.cat([target_Q2, target_Q2_aug_0, target_Q2_aug_1]))

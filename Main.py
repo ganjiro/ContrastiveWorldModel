@@ -5,10 +5,10 @@ from Manager import Manager
 
 if __name__ == "__main__":
 
-    env_name = "halfcheetah-medium-expert-v2"
+    env_name = "hopper-medium-expert-v2"
 
-    writer_name = "Writers/halfcheetah_ME__Batch_confronto/"
-    save_path = "Models/halfcheetah_ME__Batch_confronto"
+    writer_name = "Writers/hopper_ME_OP_1M/"
+    save_path = "Models/hopper_ME_OP_1M"
     repeats = 5
 
     runs = []
@@ -17,28 +17,12 @@ if __name__ == "__main__":
     for i in range(repeats):
         manager = Manager(model_name=model_name, env_name=env_name, savepath=save_path, contrastive=False,
                           perc=0,
-                          writer_name=writer_name, entire_trajectory=False, dimension=500000,
+                          writer_name=writer_name, entire_trajectory=True, dimension=500000,
                           action=False, equal_size=True,
                           test_name=test_name)
 
-        manager.train(500)
-        runs.append(manager.test_td3_bc(corr_type=1, aug=11, hyperparameter=0.5, iterations=500000))
-        np.save(os.path.join(writer_name, test_name + '.npy'), np.array(runs))
-    runs = np.array(runs)
-    np.save(os.path.join(writer_name, test_name + '.npy'), runs)
-
-    runs = []
-    model_name = "end_to_end"
-    test_name = "batch_w_eps"
-    for i in range(repeats):
-        manager = Manager(model_name=model_name, env_name=env_name, savepath=save_path, contrastive=False,
-                          perc=0,
-                          writer_name=writer_name, entire_trajectory=False, dimension=500000,
-                          action=False, equal_size=True,
-                          test_name=test_name)
-
-        manager.train(500)
-        runs.append(manager.test_td3_bc(corr_type=1, aug=12, hyperparameter=0.5, iterations=500000))
+        manager.train(100) ##TODO oCCHIo
+        runs.append(manager.test_td3_bc(corr_type=1, aug=1, hyperparameter=0.5, iterations=1000000))
         np.save(os.path.join(writer_name, test_name + '.npy'), np.array(runs))
     runs = np.array(runs)
     np.save(os.path.join(writer_name, test_name + '.npy'), runs)
@@ -49,13 +33,28 @@ if __name__ == "__main__":
     for i in range(repeats):
         manager = Manager(model_name=model_name, env_name=env_name, savepath=save_path, contrastive=True,
                           perc=0,
-                          writer_name=writer_name, entire_trajectory=False, dimension=500000,
-                          equal_size=True,
+                          writer_name=writer_name, entire_trajectory=True, dimension=500000,
+                          action=False, equal_size=True,
                           test_name=test_name)
-        runs.append(manager.test_td3_bc(corr_type=1, iterations=500000))
-        np.save(os.path.join(writer_name, test_name + '.npy'), runs)
+
+        runs.append(manager.test_td3_bc(corr_type=1, aug=0, hyperparameter=0, iterations=1000000))
+        np.save(os.path.join(writer_name, test_name + '.npy'), np.array(runs))
     runs = np.array(runs)
     np.save(os.path.join(writer_name, test_name + '.npy'), runs)
+
+    # runs = []
+    # model_name = ""
+    # test_name = "Vanilla"
+    # for i in range(repeats):
+    #     manager = Manager(model_name=model_name, env_name=env_name, savepath=save_path, contrastive=True,
+    #                       perc=0,
+    #                       writer_name=writer_name, entire_trajectory=True, dimension=500000,
+    #                       equal_size=True,
+    #                       test_name=test_name)
+    #     runs.append(manager.test_td3_bc(corr_type=1, iterations=500000))
+    #     np.save(os.path.join(writer_name, test_name + '.npy'), runs)
+    # runs = np.array(runs)
+    # np.save(os.path.join(writer_name, test_name + '.npy'), runs)
 
     # model_name = "end_to_end"
     # for i in np.arange(0.2, 1.0, 0.1):

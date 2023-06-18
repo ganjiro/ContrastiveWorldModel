@@ -26,3 +26,12 @@ def plot(file_path, file_name_vanilla, file_name_mine, save_name):
     plt.legend(loc="upper left")
 
     plt.savefig(os.path.join(file_path, save_name + ".png"))
+
+
+if __name__ == "__main__":
+    name = "walker2d_ME_50K_DENOISE"
+    writer_name = "Writers/" + name
+
+    test_name_1 = "denoised"
+    test_name_2 = "Vanilla"
+    plot(writer_name, test_name_2, test_name_1, name)

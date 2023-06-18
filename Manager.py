@@ -83,14 +83,14 @@ class Manager:
                                                             z_dim=12, action_dim=self.env.action_space.shape[0],
                                                             hidden_dim_head=300).to(self.device)
 
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-5)
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
 
             self.train_fn = self._train_end_to_end_new
 
             if self.contrastive:
                 self.model_vae = VAE(input_dim=self.env.observation_space.shape[0], hidden_dim=500, z_dim=12).to(
                     self.device)
-                self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-4)
+                self.optimizer_vae = torch.optim.Adam(self.model_vae.parameters(), lr=1e-5)
                 self.loaded_vae = False
 
             if self.action:
@@ -743,8 +743,8 @@ class Manager:
 
         itr_ = itr % (len(self.loader) * 50)
 
-        beta = min((itr_ / (len(self.loader) * 25)), 1)
-
+        #beta = min((itr_ / (len(self.loader) * 25)), 1)
+        beta = 1
         self.writer.add_scalar("itr", itr_, itr)
         self.writer.add_scalar("beta", beta, itr)
 
