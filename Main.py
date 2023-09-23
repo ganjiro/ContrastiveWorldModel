@@ -21,7 +21,7 @@ if __name__ == "__main__":
                           action=False, equal_size=True,
                           test_name=test_name)
 
-        manager.train(100) ##TODO oCCHIo
+        manager.train(100) #TODO oCCHIo
         runs.append(manager.test_td3_bc(corr_type=1, aug=1, hyperparameter=0.5, iterations=1000000))
         np.save(os.path.join(writer_name, test_name + '.npy'), np.array(runs))
     runs = np.array(runs)

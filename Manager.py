@@ -10,11 +10,12 @@ from DatasetBuilder import D4RLDataset  # D4RLDatasetTest
 from Models import Contrastive_world_model_end_to_end, VAE, \
     ContrastiveHead, Contrastive_world_model_end_to_end_reward, ActionDecoder
 
-from TD3_BC_WM import TD3_BC_WM, ReplayBuffer, eval_policy
+from TD3 import TD3
+from TD3_BC_WM import TD3_BC_WM, ReplayBuffer, eval_policy, create_gif, eval_policy_unorm
 
 os.environ["D4RL_SUPPRESS_IMPORT_ERROR"] = "1"
 os.environ["LD_LIBRARY_PATH"] = ":/home/ganjiro/.mujoco/mujoco210/bin:/usr/lib/nvidia"
-
+# os.environ["LD_PRELOAD"] = "usr/lib/x86_64-linux-gnu/libGLEW.so:/usr/lib/nvidia-384/libGL.so"
 import d4rl
 
 import gym
@@ -51,7 +52,8 @@ class Manager:
 
         if equal_size:
             self.dataset_contr, self.dataset_rl, self.dataset_test, self.corrupted_index = self.create_dataset_equal_size(
-                perc=perc, envname=self.env_name[:self.env_name.find("-")], entire_trajectory=entire_trajectory,dimension=dimension, inject_noise=inject_noise)
+                perc=perc, envname=self.env_name[:self.env_name.find("-")], entire_trajectory=entire_trajectory,
+                dimension=dimension, inject_noise=inject_noise)
         elif self.entire_trajectory and not dimension:
             self.dataset_contr, self.dataset_rl, self.dataset_test, dimension = self.create_full_dataset(
                 self.env.get_dataset(), inject_noise)
@@ -66,15 +68,16 @@ class Manager:
                                  num_workers=8)
         self.test_loader = DataLoader(D4RLDataset(self.dataset_test, std_reward), batch_size=500, shuffle=True,
                                       num_workers=8)
+        if writer_name:
+            self.writer_name = test_name + '_' + self.model_name + (
+                '_traj' if self.entire_trajectory else '_random') + '_' + str(dimension) + (
+                                   '' if contrastive else '_no_contrastive') + '_' + env_name + (
+                                   '' if perc == 0 else str(perc))
 
-        self.writer_name = test_name + '_' + self.model_name + (
-                               '_traj' if self.entire_trajectory else '_random') + '_' + str(dimension) + (
-                               '' if contrastive else '_no_contrastive') + '_' + env_name + (
-                               '' if perc == 0 else str(perc))
+            self.writer = SummaryWriter(
+                writer_name + '/' + self.writer_name + '/' + datetime.now().strftime(
+                    "%m-%d-%Y_%H:%M"))
 
-        self.writer = SummaryWriter(
-            writer_name + '/' + self.writer_name + '/' + datetime.now().strftime(
-                "%m-%d-%Y_%H:%M"))
         self.loss_function_contrastive = nn.CrossEntropyLoss()
 
         if model_name == "end_to_end":
@@ -214,7 +217,7 @@ class Manager:
 
         return dataset_wl_rl, dataset, dataset_test
 
-    def create_datasets(self, dataset, dimension, perc,inject_noise ):  # todo forse queste deep copy sono useless
+    def create_datasets(self, dataset, dimension, perc, inject_noise):  # todo forse queste deep copy sono useless
 
         try:
             dataset['next_observations']
@@ -430,8 +433,10 @@ class Manager:
         index_test = index[-10000:]
 
         dataset_test['actions'] = np.concatenate((dataset_test['actions'], dataset_e['actions'][index_test]))
-        dataset_test['observations'] = np.concatenate((dataset_test['observations'], dataset_e['observations'][index_test]))
-        dataset_test['next_observations'] = np.concatenate((dataset_test['next_observations'], dataset_e['next_observations'][index_test]))
+        dataset_test['observations'] = np.concatenate(
+            (dataset_test['observations'], dataset_e['observations'][index_test]))
+        dataset_test['next_observations'] = np.concatenate(
+            (dataset_test['next_observations'], dataset_e['next_observations'][index_test]))
         dataset_test['rewards'] = np.concatenate((dataset_test['rewards'], dataset_e['rewards'][index_test]))
         dataset_test['terminals'] = np.concatenate((dataset_test['terminals'], dataset_e['terminals'][index_test]))
         dataset_test['timeouts'] = np.concatenate((dataset_test['timeouts'], dataset_e['timeouts'][index_test]))
@@ -743,7 +748,7 @@ class Manager:
 
         itr_ = itr % (len(self.loader) * 50)
 
-        #beta = min((itr_ / (len(self.loader) * 25)), 1)
+        # beta = min((itr_ / (len(self.loader) * 25)), 1)
         beta = 1
         self.writer.add_scalar("itr", itr_, itr)
         self.writer.add_scalar("beta", beta, itr)
@@ -825,7 +830,9 @@ class Manager:
 
     def test_td3_bc(self, corr_type=0, aug=0, eps=0,
                     hyperparameter=None,
-                    iterations=500000):  # corr_type 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove;
+                    iterations=500000, gif=False,
+                    save_path=None, pre_training=False):
+        # corr_type 0 with model; 1 no corr; 2 mean; 3 noise; 4 remove;
         # Aug 0 No aug; 1 Perc Batch; 2 Over esitmation # 3 noise # 4 S4rl # 5 batch REW
         run = []
 
@@ -868,6 +875,74 @@ class Manager:
                 run.append(score)
                 self.writer.add_scalar("D4RL_score",
                                        score, t)
+        if gif:
+            create_gif(policy, self.env_name, 42, mean, std)
+
+        if save_path:
+            policy.save(save_path)
+
+        if pre_training:
+            policy = TD3(state_dim=self.env.observation_space.shape[0], action_dim=self.env.action_space.shape[0],
+                         max_action=max_action, device=self.device, load_path=save_path)
+
+            replay_buffer = ReplayBuffer(state_dim=self.env.observation_space.shape[0],
+                                         action_dim=self.env.action_space.shape[0], device=self.device)
+
+            state, done = self.env.reset(), False
+            episode_reward = 0
+            episode_timesteps = 0
+            episode_num = 0
+
+            state = (state - mean_) / std_
+
+            for t in range(500000):
+
+                episode_timesteps += 1
+
+                # Select action randomly or according to policy
+                # if t < 25e3:
+                #     action = self.env.action_space.sample()
+                # else:
+                action = (
+                        policy.select_action(np.array(state))
+                        + np.random.normal(0, max_action * 0.1, size=self.env.action_space.shape[0])
+                ).clip(-max_action, max_action)
+
+                # Perform action
+                next_state, reward, done, _ = self.env.step(action)
+                done_bool = float(done) if episode_timesteps < self.env._max_episode_steps else 0
+
+                next_state = (next_state - mean_) / std_
+
+                # Store data in replay buffer
+                replay_buffer.add(state, action, next_state, reward, done_bool)
+
+                state = next_state
+                episode_reward += reward
+
+                # Train agent after collecting sufficient data
+                if t >= 25e3:
+                    policy.train(replay_buffer=replay_buffer, batch_size=256)
+
+                    # replay_buffer.get_mean_std()
+
+
+                if done:
+                    # +1 to account for 0 indexing. +0 on ep_timesteps since it will increment +1 even if done=True
+                    # print(
+                    #     f"Total T: {t + 1} Episode Num: {episode_num + 1} Episode T: {episode_timesteps} Reward: {episode_reward:.3f}")
+                    # Reset environment
+                    state, done = self.env.reset(), False
+                    episode_reward = 0
+                    episode_timesteps = 0
+                    episode_num += 1
+
+                # Evaluate episode
+                if (t + 0) % 5000 == 0 :#and t > 24900:
+                    print(f"Time steps: {t + 1}")
+                    score = eval_policy(policy, self.env_name, 42, mean_, std_)
+                    run.append(score)
+                    self.writer.add_scalar("D4RL_score", score, t)
 
         return run
 

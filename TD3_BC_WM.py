@@ -1,5 +1,6 @@
 import io
 import random
+import time
 from collections import namedtuple, deque
 
 import PIL.Image
@@ -480,12 +481,25 @@ class ReplayBuffer(object):
         self.reward = dataset['rewards'].reshape(-1, 1)
         self.not_done = 1. - dataset['terminals'].reshape(-1, 1)
         self.size = self.state.shape[0]
+        # self.ptr = self.state.shape[0]
+        #
+        # self.state = np.concatenate((self.state, np.zeros((self.max_size - self.size, self.state.shape[1]))), axis=0)
+        # self.action = np.concatenate((self.action, np.zeros((self.max_size - self.size, self.action.shape[1]))), axis=0)
+        # self.next_state = np.concatenate((self.next_state, np.zeros((self.max_size - self.size, self.state.shape[1]))),
+        #                                  axis=0)
+        # self.reward = np.concatenate((self.reward, np.zeros((self.max_size - self.size, 1))), axis=0)
+        # self.not_done = np.concatenate((self.not_done, np.zeros((self.max_size - self.size, 1))), axis=0)
 
     def normalize_states(self, eps=1e-3):
         mean = self.state.mean(0, keepdims=True)
         std = self.state.std(0, keepdims=True) + eps
         self.state = (self.state - mean) / std
         self.next_state = (self.next_state - mean) / std
+        return mean, std
+
+    def get_mean_std(self, eps=1e-3):
+        mean = self.state.mean(0, keepdims=True)
+        std = self.state.std(0, keepdims=True) + eps
         return mean, std
 
 
@@ -509,3 +523,61 @@ def eval_policy(policy, env_name, seed, mean, std, seed_offset=100, eval_episode
     print(f"Evaluation over {eval_episodes} episodes: {avg_reward:.3f}, D4RL score: {d4rl_score:.3f}")
     print("---------------------------------------")
     return d4rl_score
+
+
+def create_gif(policy, env_name, seed, mean, std):
+    import imageio
+
+    # Make the environment and the initial observation `o`.
+
+    eval_env = gym.make(env_name)
+
+    # For video / GIF.
+    dur = 0.033
+
+    ep_obs = []
+    avg_reward = 0.
+    eval_env.metadata['render_fps'] = 10
+    state, done = eval_env.reset(), False
+
+    i = 0
+    while not done or i == 100:
+        state = (np.array(state).reshape(1, -1) - mean) / std
+        action = policy.select_action(state)
+        obs = eval_env.render(mode='rgb_array')
+        state, reward, done, _ = eval_env.step(action)
+
+        i += 1
+        # time.sleep(10000)
+        ep_obs.append(obs)
+        avg_reward += reward
+
+    ep_name = f'ep_{env_name}_dur_{dur}_len_.gif'
+    with imageio.get_writer(ep_name, mode='I', duration=dur) as writer:
+        for obs_np in ep_obs:
+            writer.append_data(obs_np)
+    writer.close()
+    # for i, arr in enumerate(ep_obs):
+    #     img = PIL.Image.fromarray(arr, 'RGB')
+    #     img.save('img/out'+str(i)+'.png')
+
+
+def eval_policy_unorm(policy, env_name, seed, eval_episodes=10):
+    eval_env = gym.make(env_name)
+    eval_env.seed(seed + 100)
+
+    avg_reward = 0.
+    for _ in range(eval_episodes):
+        state, done = eval_env.reset(), False
+        while not done:
+            action = policy.select_action(np.array(state))
+            state, reward, done, _ = eval_env.step(action)
+            avg_reward += reward
+
+    avg_reward /= eval_episodes
+    d4rl_score = eval_env.get_normalized_score(avg_reward) * 100
+
+    print("---------------------------------------")
+    print(f"Evaluation over {eval_episodes} episodes: {avg_reward:.3f}, D4RL score: {d4rl_score:.3f}")
+    print("---------------------------------------")
+    return avg_reward
