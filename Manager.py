@@ -895,7 +895,7 @@ class Manager:
 
             state = (state - mean_) / std_
 
-            for t in range(300000):
+            for t in range(500000):
 
                 episode_timesteps += 1
 

@@ -262,15 +262,7 @@ class TD3_BC_WM(object):
 
                 target_Q1_aug_0, target_Q2_aug_0 = self.critic_target(next_state_aug_0, next_action)
                 target_Q1_aug_1, target_Q2_aug_1 = self.critic_target(next_state_aug_1, next_action)
-                #
-                # target_Q1 = target_Q1 * hyperparameter
-                # target_Q2 = target_Q2 * hyperparameter
-                #
-                # target_Q1_aug_0 = target_Q1_aug_0 * (1 - (hyperparameter / 2))
-                # target_Q2_aug_0 = target_Q2_aug_0 * (1 - (hyperparameter / 2))
-                #
-                # target_Q1_aug_1 = target_Q1_aug_1 * (1 - (hyperparameter / 2))
-                # target_Q2_aug_1 = target_Q2_aug_1 * (1 - (hyperparameter / 2))
+
 
                 target_Q1 = torch.mean(torch.cat([target_Q1, target_Q1_aug_0, target_Q1_aug_1]))
                 target_Q2 = torch.mean(torch.cat([target_Q2, target_Q2_aug_0, target_Q2_aug_1]))
@@ -458,6 +450,15 @@ class ReplayBuffer(object):
 
         self.ptr = (self.ptr + 1) % self.max_size
         self.size = min(self.size + 1, self.max_size)
+
+    def get(self):
+        return (
+            torch.FloatTensor(self.state).to(self.device),
+            torch.FloatTensor(self.action).to(self.device),
+            torch.FloatTensor(self.next_state).to(self.device),
+            torch.FloatTensor(self.reward).to(self.device),
+            torch.FloatTensor(self.not_done).to(self.device)
+        )
 
     def sample(self, batch_size):
         ind = np.random.randint(0, self.size, size=batch_size)
